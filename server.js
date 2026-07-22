@@ -105,64 +105,153 @@ async function loginToInstagram() {
     const page = await context.newPage();
     console.log('🔑 Logging into Instagram...');
 
-    // Dismiss cookie banner if present
-    await page.goto('https://www.instagram.com/accounts/login/', { waitUntil: 'commit', timeout: 30000 }).catch(() => {});
-    await page.waitForTimeout(4000);
-
-    // Accept cookies if the banner is there
+    // Load the login page with patience
+    console.log('  Loading login page...');
     try {
-      const cookieBtn = page.locator('button:has-text("Allow"), button:has-text("Accept"), button:has-text("Allow all")').first();
-      await cookieBtn.click({ timeout: 5000 });
-      await page.waitForTimeout(2000);
-    } catch (e) {}
-
-    // Try multiple selectors for username — Instagram changes these frequently
-    const usernameInput = page.locator(
-      'input[name="username"], ' +
-      'input[autocomplete="username"], ' +
-      'input[aria-label*="Phone" i], ' +
-      'input[aria-label*="username" i], ' +
-      'input[aria-label*="email" i], ' +
-      'input[aria-label*="number" i]'
-    ).first();
-    await usernameInput.waitFor({ timeout: 20000 });
-    await usernameInput.fill(IG_USERNAME, { timeout: 10000 });
-    await page.waitForTimeout(500);
-
-    const passwordInput = page.locator(
-      'input[name="password"], ' +
-      'input[autocomplete="current-password"], ' +
-      'input[aria-label*="Password" i]'
-    ).first();
-    await passwordInput.fill(IG_PASSWORD, { timeout: 10000 });
-    await page.waitForTimeout(500);
-
-    const loginBtn = page.locator(
-      'button[type="submit"], ' +
-      'div[role="button"]:has-text("Log in"), ' +
-      'button:has-text("Log in"), ' +
-      'button:has-text("Log In")'
-    ).first();
-    await loginBtn.click();
+      await page.goto('https://www.instagram.com/accounts/login/', {
+        waitUntil: 'networkidle',
+        timeout: 45000,
+      });
+    } catch (e) {
+      console.log('  ⚠️ Initial load timeout, retrying...');
+      await page.goto('https://www.instagram.com/accounts/login/', {
+        waitUntil: 'domcontentloaded',
+        timeout: 30000,
+      }).catch(() => {});
+    }
+    // Give React time to render the form (Render is slow with 512MB)
+    console.log('  Waiting for form to render...');
     await page.waitForTimeout(8000);
 
-    // Check if login succeeded by waiting for the page to change
-    let loginSuccess = false;
-    try {
-      // If we see "login" in URL after 8s, the page might still be loading — wait more
-      const currentUrl = page.url();
-      if (currentUrl.includes('accounts/login')) {
-        await page.waitForTimeout(5000);
-      }
-      loginSuccess = !page.url().includes('accounts/login');
-    } catch (e) {}
+    // DEBUG: dump the page structure so we can see what's there
+    const debugInfo = await page.evaluate(() => {
+      const info = {
+        title: document.title,
+        url: location.href,
+        bodyHTML: document.body?.innerHTML?.substring(0, 2000) || 'no body',
+        inputCount: document.querySelectorAll('input').length,
+        inputs: [],
+        buttonCount: document.querySelectorAll('button, div[role="button"]').length,
+        buttons: [],
+        forms: document.querySelectorAll('form').length,
+        links: document.querySelectorAll('a').length,
+      };
+      document.querySelectorAll('input').forEach(el => {
+        info.inputs.push({
+          type: el.type,
+          name: el.name,
+          placeholder: el.placeholder,
+          autocomplete: el.autocomplete,
+          'aria-label': el.getAttribute('aria-label'),
+          id: el.id,
+          class: el.className?.substring(0, 60),
+          visible: el.offsetParent !== null,
+        });
+      });
+      document.querySelectorAll('button').forEach(el => {
+        info.buttons.push({
+          text: el.textContent?.substring(0, 50),
+          type: el.type,
+          visible: el.offsetParent !== null,
+        });
+      });
+      return info;
+    });
+    console.log(`  Page: "${debugInfo.title}"`);
+    console.log(`  Inputs: ${debugInfo.inputCount}, Buttons: ${debugInfo.buttonCount}, Forms: ${debugInfo.forms}`);
+    if (debugInfo.inputs.length > 0) {
+      console.log(`  Input[0]: type=${debugInfo.inputs[0].type}, name=${debugInfo.inputs[0].name}, placeholder="${debugInfo.inputs[0].placeholder}", autocomplete=${debugInfo.inputs[0].autocomplete}, aria-label="${debugInfo.inputs[0]['aria-label']}"`);
+    }
 
-    if (!loginSuccess) {
-      // Try pressing Enter as fallback
-      try {
+    // Try up to 3 times to find input fields
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const hasInputs = await page.evaluate(() => {
+        return document.querySelectorAll('input:not([type="hidden"])').length;
+      });
+
+      if (hasInputs >= 2) {
+        console.log(`  Found ${hasInputs} input fields`);
+        break;
+      }
+
+      if (attempt < 2) {
+        console.log(`  ⚠️ Only ${hasInputs} inputs found (attempt ${attempt + 1}), waiting...`);
+        await page.waitForTimeout(4000);
+
+        // Maybe there's a cookie wall blocking the form — try dismissing anything
+        try {
+          const anyBtn = page.locator('button, div[role="button"], a').filter({ hasText: /allow|accept|log in|sign in/i }).first();
+          await anyBtn.click({ timeout: 2000 });
+          await page.waitForTimeout(3000);
+        } catch (e) {}
+      }
+    }
+
+    // Fill username + password by index (always input[0] = username, input[1] = password)
+    const filled = await page.evaluate((username, password) => {
+      const inputs = document.querySelectorAll('input:not([type="hidden"])');
+      if (inputs.length < 2) return { found: inputs.length, filled: false };
+
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+
+      setter.call(inputs[0], username);
+      inputs[0].dispatchEvent(new Event('input', { bubbles: true }));
+      inputs[0].dispatchEvent(new Event('change', { bubbles: true }));
+
+      setter.call(inputs[1], password);
+      inputs[1].dispatchEvent(new Event('input', { bubbles: true }));
+      inputs[1].dispatchEvent(new Event('change', { bubbles: true }));
+
+      return { found: inputs.length, filled: true };
+    }, IG_USERNAME, IG_PASSWORD);
+
+    console.log(`  Fields: ${filled.found} found, ${filled.filled ? '✅ filled' : '❌ not filled'}`);
+
+    // Fallback: Playwright locator fill
+    if (!filled.filled) {
+      const inputs = await page.locator('input').all().catch(() => []);
+      if (inputs.length >= 1) await inputs[0].fill(IG_USERNAME, { timeout: 5000 }).catch(() => {});
+      if (inputs.length >= 2) await inputs[1].fill(IG_PASSWORD, { timeout: 5000 }).catch(() => {});
+    }
+
+    await page.waitForTimeout(1500);
+
+    // Submit: try to find and click Log In button, or press Enter
+    const buttons = await page.locator('button, div[role="button"]').all().catch(() => []);
+    let submitted = false;
+    for (const btn of buttons) {
+      const txt = await btn.textContent().catch(() => '');
+      if (/log in|sign in|submit/i.test(txt)) {
+        await btn.click({ force: true }).catch(() => {});
+        submitted = true;
+        console.log('  ✅ Clicked Log In');
+        break;
+      }
+    }
+    if (!submitted) {
+      if (buttons.length > 0) {
+        await buttons[buttons.length - 1].click({ force: true }).catch(() => {});
+        console.log('  Clicked last button');
+      } else {
         await page.keyboard.press('Enter');
-        await page.waitForTimeout(6000);
-      } catch (e) {}
+        console.log('  Pressed Enter');
+      }
+    }
+
+    // Wait for redirect away from login page
+    console.log('  Waiting for login to complete...');
+    await page.waitForTimeout(10000);
+
+    try {
+      await page.waitForURL(/instagram\.com\/(?!accounts\/login)/, { timeout: 25000 });
+      console.log('  ✅ Redirected from login');
+    } catch (e) {
+      console.log('  ⚠️ Still on login page, retrying submit...');
+      await page.keyboard.press('Enter');
+      await page.waitForTimeout(8000);
+      try {
+        await page.waitForURL(/instagram\.com\/(?!accounts\/login)/, { timeout: 20000 });
+      } catch (e2) {}
     }
 
     // Dismiss "Save Info" popup
