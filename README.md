@@ -1,14 +1,13 @@
-# Instagram Marketing API v1.1
+# Instagram Marketing API v2.0
 
-**Full-featured Instagram API for n8n HTTP Request node.** Search content, get viral reels, follow niche accounts, extract text via OCR, and download media — all from a free Render web service. **Every call returns fresh, different content — never repeats.**
+**100% real Instagram content API for n8n HTTP Request node.** Uses Playwright to log into your Instagram account and scrape real posts. No fake data, no fallbacks.
 
 ## 🧠 How It Works
 
 1. **Instagram Login** — Your Instagram account logs in via Playwright browser automation
 2. **Cookie Persistence** — Session is saved and reused across restarts
 3. **Search & Explore** — Browser-based content extraction (no official API needed)
-4. **Niche Training** — Follow accounts in your niche to train Explore page
-5. **Free Hosting** — Runs on Render free plan (Docker + Chromium)
+4. **Free Hosting** — Runs on Render free plan (Docker + Chromium)
 
 ## 🚀 Quick Deploy (Render)
 
