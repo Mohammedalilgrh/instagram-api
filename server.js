@@ -615,6 +615,29 @@ app.get('/api/instagram/download', async (req, res) => {
   } catch { res.status(500).json({ success: false, error: 'Download failed' }); }
 });
 
+// ─── Session Export/Import ────────────────────
+app.get('/api/instagram/session/export', (req, res) => {
+  try {
+    const data = fs.readFileSync(STATE_FILE, 'utf8');
+    res.json({ success: true, session: JSON.parse(data) });
+  } catch {
+    res.json({ success: false, error: 'No session file', note: 'Login first or upload a session' });
+  }
+});
+
+app.post('/api/instagram/session/import', async (req, res) => {
+  try {
+    const session = req.body?.session;
+    if (!session || !Array.isArray(session)) return res.status(400).json({ success: false, error: 'Missing "session" array' });
+    fs.writeFileSync(STATE_FILE, JSON.stringify(session, null, 2));
+    loggedIn = true;
+    console.log('✅ Session imported from local machine');
+    res.json({ success: true, note: 'Session imported! Try search now.' });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 let ocrWorker = null;
 app.post('/api/instagram/ocr', async (req, res) => {
   try {
