@@ -3,10 +3,8 @@
 # ─────────────────────────────────────────────
 FROM node:20-slim
 
-# Install Chromium and its dependencies for Playwright
+# Install Chromium system dependencies ONLY
 RUN apt-get update && apt-get install -y \
-    chromium \
-    chromium-sandbox \
     libnss3 \
     libnspr4 \
     libatk1.0-0 \
@@ -22,6 +20,9 @@ RUN apt-get update && apt-get install -y \
     libpango-1.0-0 \
     libcairo2 \
     libasound2 \
+    libatspi2.0-0 \
+    libwayland-client0 \
+    libwayland-egl1 \
     fonts-freefont-ttf \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
@@ -31,11 +32,10 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm install
 
-COPY . .
+# Install Playwright's bundled Chromium (the correct version)
+RUN npx playwright install chromium
 
-# Tell Playwright to use system Chromium
-ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-ENV CHROMIUM_PATH=/usr/bin/chromium
+COPY . .
 
 EXPOSE 3000
 

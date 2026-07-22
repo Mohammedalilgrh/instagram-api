@@ -1,6 +1,6 @@
-# Instagram Marketing API v1.0
+# Instagram Marketing API v1.1
 
-**Full-featured Instagram API for n8n HTTP Request node.** Search content, get viral reels, follow niche accounts, extract text via OCR, and download media — all from a free Render web service.
+**Full-featured Instagram API for n8n HTTP Request node.** Search content, get viral reels, follow niche accounts, extract text via OCR, and download media — all from a free Render web service. **Every call returns fresh, different content — never repeats.**
 
 ## 🧠 How It Works
 
@@ -70,6 +70,13 @@ https://your-app.onrender.com
 | `count` | number | Results to return (1-30) | `5` |
 | `follow` | string | `true` to follow niche accounts | — |
 | `exp` | string | `true` to also fetch Explore page | — |
+
+**🆕 Freshness system built-in:** Every call uses:
+- **Auto-rotating word pool** (50 words) — appends a different tag each time
+- **Dedup cache** (`seen_ids.json`) — never returns the same post twice, even across restarts
+- **Cache-busting** — unique timestamp on every URL so Instagram serves fresh results
+
+> ✅ Call it 100 times, get 100 different result sets. No repeats.
 
 **Example — Search images with quotes:**
 
