@@ -105,31 +105,77 @@ async function loginToInstagram() {
     const page = await context.newPage();
     console.log('🔑 Logging into Instagram...');
 
-    await page.goto('https://www.instagram.com/accounts/login/', { waitUntil: 'networkidle', timeout: 30000 });
-    await page.waitForTimeout(3000);
+    // Dismiss cookie banner if present
+    await page.goto('https://www.instagram.com/accounts/login/', { waitUntil: 'commit', timeout: 30000 }).catch(() => {});
+    await page.waitForTimeout(4000);
 
-    const usernameInput = page.locator('input[name="username"]').first();
-    await usernameInput.fill(IG_USERNAME);
-    await page.waitForTimeout(500);
-
-    const passwordInput = page.locator('input[name="password"]').first();
-    await passwordInput.fill(IG_PASSWORD);
-    await page.waitForTimeout(500);
-
-    const loginBtn = page.locator('button[type="submit"]').first();
-    await loginBtn.click();
-    await page.waitForTimeout(6000);
-    await page.waitForLoadState('domcontentloaded', { timeout: 20000 }).catch(() => {});
-
+    // Accept cookies if the banner is there
     try {
-      const notNowBtn = page.locator('button:has-text("Not Now"), button:has-text("Save Info"), div[role="button"]:has-text("Not Now")').first();
+      const cookieBtn = page.locator('button:has-text("Allow"), button:has-text("Accept"), button:has-text("Allow all")').first();
+      await cookieBtn.click({ timeout: 5000 });
+      await page.waitForTimeout(2000);
+    } catch (e) {}
+
+    // Try multiple selectors for username — Instagram changes these frequently
+    const usernameInput = page.locator(
+      'input[name="username"], ' +
+      'input[autocomplete="username"], ' +
+      'input[aria-label*="Phone" i], ' +
+      'input[aria-label*="username" i], ' +
+      'input[aria-label*="email" i], ' +
+      'input[aria-label*="number" i]'
+    ).first();
+    await usernameInput.waitFor({ timeout: 20000 });
+    await usernameInput.fill(IG_USERNAME, { timeout: 10000 });
+    await page.waitForTimeout(500);
+
+    const passwordInput = page.locator(
+      'input[name="password"], ' +
+      'input[autocomplete="current-password"], ' +
+      'input[aria-label*="Password" i]'
+    ).first();
+    await passwordInput.fill(IG_PASSWORD, { timeout: 10000 });
+    await page.waitForTimeout(500);
+
+    const loginBtn = page.locator(
+      'button[type="submit"], ' +
+      'div[role="button"]:has-text("Log in"), ' +
+      'button:has-text("Log in"), ' +
+      'button:has-text("Log In")'
+    ).first();
+    await loginBtn.click();
+    await page.waitForTimeout(8000);
+
+    // Check if login succeeded by waiting for the page to change
+    let loginSuccess = false;
+    try {
+      // If we see "login" in URL after 8s, the page might still be loading — wait more
+      const currentUrl = page.url();
+      if (currentUrl.includes('accounts/login')) {
+        await page.waitForTimeout(5000);
+      }
+      loginSuccess = !page.url().includes('accounts/login');
+    } catch (e) {}
+
+    if (!loginSuccess) {
+      // Try pressing Enter as fallback
+      try {
+        await page.keyboard.press('Enter');
+        await page.waitForTimeout(6000);
+      } catch (e) {}
+    }
+
+    // Dismiss "Save Info" popup
+    try {
+      const notNowBtn = page.locator('button:has-text("Not Now"), div[role="button"]:has-text("Not Now"), button:has-text("Save Info")').first();
       await notNowBtn.click({ timeout: 5000 });
       await page.waitForTimeout(2000);
     } catch (e) {}
 
+    // Dismiss notifications popup
     try {
-      const notNowNotif = page.locator('button:has-text("Not Now")').first();
-      await notNowNotif.click({ timeout: 5000 });
+      const notifBtn = page.locator('button:has-text("Not Now")').first();
+      await notifBtn.click({ timeout: 5000 });
       await page.waitForTimeout(2000);
     } catch (e) {}
 
@@ -829,6 +875,7 @@ app.get('/', (req, res) => {
       follow: 'GET /api/instagram/follow?q=KEYWORD&count=5',
       download: 'GET /api/instagram/download?url=MEDIA_URL',
       ocr: 'POST /api/instagram/ocr { "url": "MEDIA_URL" }',
+      login_reset: 'GET /api/instagram/login — force re-login if session expired',
     },
     examples: {
       search_image: 'GET /api/instagram/search?q=quotes&media=image&count=5',
@@ -861,3 +908,12 @@ app.listen(PORT, async () => {
 
 process.on('SIGTERM', () => process.exit(0));
 process.on('SIGINT', () => process.exit(0));
+
+// ── Login Reset Endpoint ──
+// GET /api/instagram/login — force re-login manually
+
+app.get('/api/instagram/login', async (req, res) => {
+  loggedIn = false;
+  const result = await loginToInstagram();
+  res.json({ success: result, loggedIn });
+});
