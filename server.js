@@ -105,43 +105,65 @@ async function loginToInstagram() {
     const page = await context.newPage();
     console.log('🔑 Logging into Instagram...');
 
-    // Load the login page with patience
+    // ── Load login page with retry ──
     console.log('  Loading login page...');
-    try {
-      await page.goto('https://www.instagram.com/accounts/login/', {
-        waitUntil: 'networkidle',
-        timeout: 45000,
-      });
-    } catch (e) {
-      console.log('  ⚠️ Initial load timeout, retrying...');
-      await page.goto('https://www.instagram.com/accounts/login/', {
-        waitUntil: 'domcontentloaded',
-        timeout: 30000,
-      }).catch(() => {});
-    }
-    // Give React time to render the form (Render is slow with 512MB)
-    console.log('  Waiting for form to render...');
-    await page.waitForTimeout(8000);
 
-    // Check if we're on a landing/marketing page (no form yet, just "Log in" link)
-    // Instagram sometimes serves /accounts/login/ but shows a splash page first
-    const hasForm = await page.evaluate(() => document.querySelectorAll('input').length >= 2).catch(() => false);
-    if (!hasForm) {
-      console.log('  No form found, checking for landing page...');
-      // Look for ANY link/button that says "Log in" and click it
-      const logInCandidates = await page.locator('a, button, div[role="button"]').filter({ hasText: /Log in/i }).all().catch(() => []);
-      for (const el of logInCandidates) {
-        const visible = await el.isVisible().catch(() => false);
-        if (visible) {
-          await el.click().catch(() => {});
-          console.log('  Clicked "Log in" from landing page');
-          await page.waitForTimeout(5000);
-          break;
+    let pageLoaded = false;
+    for (let attempt = 0; attempt < 3 && !pageLoaded; attempt++) {
+      try {
+        await page.goto(attempt === 2 ? 'https://www.instagram.com/' : 'https://www.instagram.com/accounts/login/', {
+          waitUntil: 'commit',
+          timeout: 30000,
+        });
+        console.log(`  Attempt ${attempt + 1}: URL=${page.url().substring(0, 80)}`);
+        // Critical: wait LONG for React to render (Render is slow)
+        console.log('  Waiting for React app to render...');
+        await page.waitForTimeout(12000);
+
+        // Check if page has any content
+        const hasContent = await page.evaluate(() => document.body?.innerHTML?.length > 100).catch(() => false);
+        if (hasContent) {
+          pageLoaded = true;
+          console.log('  ✅ Page has content');
+        } else {
+          console.log(`  Empty page, retrying...`);
+          await page.waitForTimeout(3000);
         }
+      } catch (e) {
+        console.log(`  Attempt ${attempt + 1} failed: ${e.message?.substring(0, 60)}`);
+        await page.waitForTimeout(3000);
       }
     }
 
-    // DEBUG: dump the page structure so we can see what's there
+    if (!pageLoaded) {
+      // Last ditch — try the i.instagram.com (basic mobile) login
+      console.log('  Trying mobile login...');
+      await page.goto('https://www.instagram.com/accounts/login/?next=%2F', {
+        waitUntil: 'commit',
+        timeout: 30000,
+      }).catch(() => {});
+      await page.waitForTimeout(15000);
+    }
+
+    console.log(`  Final URL: ${page.url().substring(0, 80)}`);
+
+    // ── Handle landing page ──
+    // If no form on the page, Instagram probably showed a splash/marketing page
+    // Look for "Log in" button anywhere and click it
+    let formFound = await page.evaluate(() => document.querySelectorAll('input').length >= 2).catch(() => false);
+    if (!formFound) {
+      console.log('  No input form, clicking any "Log in" link...');
+      try {
+        const loginBtn = page.locator('a[href*="login"], button:has-text("Log in"), div[role="button"]:has-text("Log in")').first();
+        await loginBtn.click({ timeout: 5000 });
+        await page.waitForTimeout(5000);
+        formFound = await page.evaluate(() => document.querySelectorAll('input').length >= 2).catch(() => false);
+      } catch (e) {
+        console.log('  No "Log in" button found either');
+      }
+    }
+
+    // ── Debug dump ──
     const debugInfo = await page.evaluate(() => {
       const info = {
         title: document.title,
@@ -206,7 +228,8 @@ async function loginToInstagram() {
     }
 
     // Fill username + password by index (always input[0] = username, input[1] = password)
-    const filled = await page.evaluate((username, password) => {
+    // NOTE: page.evaluate only accepts ONE arg — pass as object
+    const filled = await page.evaluate(({ username, password }) => {
       const inputs = document.querySelectorAll('input:not([type="hidden"])');
       if (inputs.length < 2) return { found: inputs.length, filled: false };
 
@@ -221,7 +244,7 @@ async function loginToInstagram() {
       inputs[1].dispatchEvent(new Event('change', { bubbles: true }));
 
       return { found: inputs.length, filled: true };
-    }, IG_USERNAME, IG_PASSWORD);
+    }, { username: IG_USERNAME, password: IG_PASSWORD });
 
     console.log(`  Fields: ${filled.found} found, ${filled.filled ? '✅ filled' : '❌ not filled'}`);
 
