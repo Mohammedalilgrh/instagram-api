@@ -18,8 +18,8 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm install
 
-# Install FULL Chrome (not headless shell) — more stealthy
-RUN npx playwright install --with-deps chrome
+# Install FULL Chromium (not headless shell) — stealth makes it undetectable
+RUN npx playwright install --with-deps chromium
 
 COPY . .
 

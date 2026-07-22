@@ -1,5 +1,7 @@
 const express = require('express');
-const { chromium } = require('playwright');
+const { chromium } = require('playwright-extra');
+const stealth = require('puppeteer-extra-plugin-stealth')();
+chromium.use(stealth);
 const { createWorker } = require('tesseract.js');
 const cors = require('cors');
 const fs = require('fs');
@@ -119,13 +121,6 @@ async function loginToInstagram() {
     });
 
     const page = await context.newPage();
-
-    // Bypass webdriver detection
-    await page.addInitScript(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => false });
-      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-    });
     console.log('🔑 Logging into Instagram...');
 
     // Wait for full page load with network idle for JS-heavy login
@@ -724,7 +719,6 @@ app.get('/', (req, res) => {
     realInstagramOnly: true,
     seenPostsCache: seenIds.size,
     setup: loggedIn ? '✅ Instagram logged in' : '⚠️  Set IG_USERNAME & IG_PASSWORD in env vars',
-    capsolver: CAPSOLVER_KEY ? '✅ CapSolver ready' : '❌ CapSolver API key not set',
     note: '100% real Instagram content only. Returns empty if not logged in.',
     endpoints: {
       search: 'GET /api/instagram/search?q=KEYWORD&count=5',
