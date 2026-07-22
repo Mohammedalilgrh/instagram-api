@@ -92,6 +92,25 @@ function isSeen(id) { return seenIds.has(id); }
 
 let callCounter = Date.now();
 
+// ─── Auto-Retry Login ────────────────────────
+let loginInProgress = false;
+async function ensureLogin() {
+  if (loggedIn) return true;
+  if (fs.existsSync(STATE_FILE)) {
+    try {
+      const c = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+      if (c && c.length > 0) { loggedIn = true; return true; }
+    } catch (e) {}
+  }
+  if (!IG_USERNAME || !IG_PASSWORD) return false;
+  if (loginInProgress) { while (loginInProgress) await new Promise(r => setTimeout(r, 2000)); return loggedIn; }
+  loginInProgress = true;
+  console.log('🔄 Login required — attempting now...');
+  const result = await loginToInstagram();
+  loginInProgress = false;
+  return result;
+}
+
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 
 // ─── Login ─────────────────────────────────────
@@ -325,7 +344,7 @@ async function searchInstagram(query, limit = 10) {
   const maxRes = Math.min(limit, 30);
   const results = [];
 
-  if (!loggedIn && !fs.existsSync(STATE_FILE)) return [];
+  await ensureLogin();
 
   const { browser, context } = await createSession();
   const page = await context.newPage();
@@ -340,15 +359,6 @@ async function searchInstagram(query, limit = 10) {
     console.log(`🔍 IG: "${query}"`);
     await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
     await page.waitForTimeout(5000);
-
-    // Check login wall
-    const text = await page.evaluate(() => document.body.innerText.substring(0, 300));
-    if (text.includes('Log in') && !text.includes('Log out')) {
-      console.log('  ⚠️ Not logged in');
-      await context.close();
-      await browser.close();
-      return [];
-    }
 
     // Click "Top" or "Posts" tab
     try {
@@ -439,7 +449,7 @@ async function exploreInstagram(limit = 10) {
   const maxRes = Math.min(limit, 30);
   const results = [];
 
-  if (!loggedIn && !fs.existsSync(STATE_FILE)) return [];
+  await ensureLogin();
 
   const { browser, context } = await createSession();
   const page = await context.newPage();
@@ -448,14 +458,6 @@ async function exploreInstagram(limit = 10) {
     console.log('🌐 Loading IG Explore...');
     await page.goto('https://www.instagram.com/explore/', { waitUntil: 'domcontentloaded', timeout: 25000 });
     await page.waitForTimeout(5000);
-
-    const text = await page.evaluate(() => document.body.innerText.substring(0, 300));
-    if (text.includes('Log in') && !text.includes('Log out')) {
-      console.log('  ⚠️ Not logged in');
-      await context.close();
-      await browser.close();
-      return [];
-    }
 
     for (let i = 0; i < 8; i++) {
       await page.evaluate(() => window.scrollBy(0, 1200));
@@ -516,7 +518,7 @@ async function scrapeInstagramPage(pageUrl, limit = 10) {
   const maxRes = Math.min(limit, 30);
   const results = [];
 
-  if (!loggedIn && !fs.existsSync(STATE_FILE)) return [];
+  await ensureLogin();
 
   const { browser, context } = await createSession();
   const page = await context.newPage();
@@ -524,14 +526,6 @@ async function scrapeInstagramPage(pageUrl, limit = 10) {
   try {
     await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
     await page.waitForTimeout(5000);
-
-    const text = await page.evaluate(() => document.body.innerText.substring(0, 300));
-    if (text.includes('Log in') && !text.includes('Log out')) {
-      console.log('  ⚠️ Not logged in');
-      await context.close();
-      await browser.close();
-      return [];
-    }
 
     for (let i = 0; i < 8; i++) {
       await page.evaluate(() => window.scrollBy(0, 1200));
@@ -598,7 +592,7 @@ app.get('/api/instagram/search', async (req, res) => {
 
     // Scrape mode
     if (scrapeUrl) {
-      if (!loggedIn && !fs.existsSync(STATE_FILE)) {
+      if (!await ensureLogin()) {
         return res.json({ success: false, error: 'Not logged in', note: 'Set IG_USERNAME & IG_PASSWORD in env vars' });
       }
       const scraped = await scrapeInstagramPage(scrapeUrl, count);
@@ -607,7 +601,7 @@ app.get('/api/instagram/search', async (req, res) => {
 
     if (!query) return res.status(400).json({ success: false, error: 'Missing ?q' });
 
-    if (!loggedIn && !fs.existsSync(STATE_FILE)) {
+    if (!await ensureLogin()) {
       return res.json({ success: false, error: 'Not logged in', note: 'Set IG_USERNAME & IG_PASSWORD in env vars' });
     }
 
@@ -624,7 +618,7 @@ app.get('/api/instagram/search', async (req, res) => {
 
 app.get('/api/instagram/explore', async (req, res) => {
   try {
-    if (!loggedIn && !fs.existsSync(STATE_FILE)) {
+    if (!await ensureLogin()) {
       return res.json({ success: false, error: 'Not logged in', note: 'Set IG_USERNAME & IG_PASSWORD in env vars' });
     }
     const content = await exploreInstagram(parseInt(req.query.count || '10', 10));
@@ -636,7 +630,7 @@ app.get('/api/instagram/explore', async (req, res) => {
 
 app.get('/api/instagram/scrape', async (req, res) => {
   try {
-    if (!loggedIn && !fs.existsSync(STATE_FILE)) {
+    if (!await ensureLogin()) {
       return res.json({ success: false, error: 'Not logged in', note: 'Set IG_USERNAME & IG_PASSWORD in env vars' });
     }
     const url = req.query.url || req.query.pageUrl || req.query.scrape;
@@ -743,7 +737,11 @@ app.listen(PORT, async () => {
   console.log(`╚══════════════════════════════════════╝\n`);
 
   if (IG_USERNAME && IG_PASSWORD) {
-    await loginToInstagram();
+    // Try login in background — ensureLogin() will retry on first API request
+    loginToInstagram().then(r => {
+      if (r) console.log('✅ Initial login successful');
+      else console.log('⚠️ Initial login failed — will retry on first API request');
+    });
   } else {
     console.log('⚠️  Set IG_USERNAME & IG_PASSWORD in Render env vars');
   }
