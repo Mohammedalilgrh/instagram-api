@@ -123,6 +123,24 @@ async function loginToInstagram() {
     console.log('  Waiting for form to render...');
     await page.waitForTimeout(8000);
 
+    // Check if we're on a landing/marketing page (no form yet, just "Log in" link)
+    // Instagram sometimes serves /accounts/login/ but shows a splash page first
+    const hasForm = await page.evaluate(() => document.querySelectorAll('input').length >= 2).catch(() => false);
+    if (!hasForm) {
+      console.log('  No form found, checking for landing page...');
+      // Look for ANY link/button that says "Log in" and click it
+      const logInCandidates = await page.locator('a, button, div[role="button"]').filter({ hasText: /Log in/i }).all().catch(() => []);
+      for (const el of logInCandidates) {
+        const visible = await el.isVisible().catch(() => false);
+        if (visible) {
+          await el.click().catch(() => {});
+          console.log('  Clicked "Log in" from landing page');
+          await page.waitForTimeout(5000);
+          break;
+        }
+      }
+    }
+
     // DEBUG: dump the page structure so we can see what's there
     const debugInfo = await page.evaluate(() => {
       const info = {
@@ -252,16 +270,58 @@ async function loginToInstagram() {
       try {
         await page.waitForURL(/instagram\.com\/(?!accounts\/login)/, { timeout: 20000 });
       } catch (e2) {}
+
+      // If still on login, check for Account Center / Facebook linking / security checkpoint
+      const stillLogin = await page.evaluate(() => location.href.includes('accounts/login')).catch(() => true);
+      if (stillLogin) {
+        // Check for security checkpoint (challenge/verify)
+        const challengeDetected = await page.evaluate(() => {
+          const text = document.body?.innerText || '';
+          return {
+            isChallenge: /challenge|verify it's you|security code|enter confirmation/i.test(text),
+            isAccountCenter: /accounts center|continue as|try another/i.test(text),
+            isFacebookSSO: /continue with facebook|log in with facebook/i.test(text),
+            textSnippet: text.substring(0, 300),
+          };
+        }).catch(() => ({}));
+
+        console.log('  ⚠️ Still on login page!', JSON.stringify(challengeDetected));
+
+        if (challengeDetected?.isChallenge) {
+          console.log('  🔐 SECURITY CHECKPOINT — Instagram wants email/SMS verification');
+          console.log('  ➡️ Go to instagram.com on your PHONE or desktop browser');
+          console.log('  ➡️ Log in manually — Instagram will send you a code');
+          console.log('  ➡️ Complete the verification ONCE, then restart Render service');
+        } else {
+          console.log('  ➡️ Log into this Instagram account MANUALLY from your phone/desktop first');
+          console.log('  ➡️ Then restart Render service');
+        }
+      }
     }
 
-    // Dismiss "Save Info" popup
+    // Handle Account Center / "Continue as [user]" / one-tap login
+    try {
+      const continueAsBtn = page.locator('button, div[role="button"], a').filter({
+        hasText: /continue as|not now|try another|use without account/i
+      }).first();
+      if (await continueAsBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
+        const txt = await continueAsBtn.textContent().catch(() => '');
+        console.log(`  📌 Account Center prompt: "${txt}"`);
+        if (/continue as/i.test(txt)) {
+          await continueAsBtn.click();
+          await page.waitForTimeout(5000);
+        }
+      }
+    } catch (e) {}
+
+    // Handle "Save Info" popup
     try {
       const notNowBtn = page.locator('button:has-text("Not Now"), div[role="button"]:has-text("Not Now"), button:has-text("Save Info")').first();
       await notNowBtn.click({ timeout: 5000 });
       await page.waitForTimeout(2000);
     } catch (e) {}
 
-    // Dismiss notifications popup
+    // Handle notifications popup
     try {
       const notifBtn = page.locator('button:has-text("Not Now")').first();
       await notifBtn.click({ timeout: 5000 });
