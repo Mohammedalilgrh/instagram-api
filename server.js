@@ -64,59 +64,130 @@ async function loginToInstagram() {
     const page = await context.newPage();
     console.log('🔑 Logging into Instagram...');
 
-    await page.goto('https://www.instagram.com/accounts/login/', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-    await page.waitForTimeout(3000);
+    // Wait for full page load with network idle for JS-heavy login
+    await page.goto('https://www.instagram.com/accounts/login/', { waitUntil: 'networkidle', timeout: 45000 }).catch(() => {});
+    await page.waitForTimeout(5000);
 
-    // Dismiss cookies
+    // Debug: log what inputs are on the page
+    const inputNames = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('input')).map(i => i.name).filter(Boolean)
+    );
+    console.log('  Inputs found:', inputNames);
+
+    // Dismiss cookies if present
     try {
-      const cookieBtn = page.locator('button:has-text("Allow"), button:has-text("Accept"), button:has-text("Allow all")').first();
-      await cookieBtn.click({ timeout: 4000 });
+      const cookieBtn = page.locator('button:has-text("Allow"), button:has-text("Accept")').first();
+      await cookieBtn.click({ timeout: 3000 });
       await page.waitForTimeout(1500);
     } catch (e) {}
 
-    // Fill username / email
+    // Wait for any input to appear (login form JS-rendered)
     try {
-      const usernameInput = page.locator('input[name="email"]').first();
-      await usernameInput.waitFor({ timeout: 15000 });
-      await usernameInput.fill(IG_USERNAME);
-      await page.waitForTimeout(500);
+      await page.waitForSelector('input[name="email"], input[name="username"], input[autocomplete="username"]', { timeout: 20000 });
     } catch (e) {
-      console.log('  ⚠️ Could not find username field');
+      // Try waiting more
+      await page.waitForTimeout(5000);
+    }
+
+    // Try multiple selectors for username/email
+    let usernameFilled = false;
+    const usernameSelectors = ['input[name="email"]', 'input[name="username"]', 'input[autocomplete="username"]'];
+    for (const sel of usernameSelectors) {
+      try {
+        const el = page.locator(sel).first();
+        if (await el.count() > 0) {
+          await el.waitFor({ timeout: 5000 });
+          await el.fill(IG_USERNAME);
+          usernameFilled = true;
+          console.log(`  ✅ Filled username via: ${sel}`);
+          break;
+        }
+      } catch (e) {}
+    }
+
+    if (!usernameFilled) {
+      // Last resort: find any visible text input
+      try {
+        const inputs = page.locator('input:not([type="hidden"])');
+        const count = await inputs.count();
+        for (let i = 0; i < count; i++) {
+          const type = await inputs.nth(i).getAttribute('type');
+          if (type === 'text' || type === 'email' || !type) {
+            await inputs.nth(i).fill(IG_USERNAME);
+            usernameFilled = true;
+            console.log('  ✅ Filled username via fallback');
+            break;
+          }
+        }
+      } catch (e) {}
+    }
+
+    if (!usernameFilled) {
+      console.log('  ⚠️ Could not find username field. Page URL:', page.url());
       await context.close();
       await browser.close();
       return false;
     }
 
-    // Fill password
-    try {
-      const passwordInput = page.locator('input[name="pass"]').first();
-      await passwordInput.waitFor({ timeout: 15000 });
-      await passwordInput.fill(IG_PASSWORD);
-      await page.waitForTimeout(500);
-    } catch (e) {
+    await page.waitForTimeout(500);
+
+    // Fill password — try multiple selectors
+    let passwordFilled = false;
+    const passwordSelectors = ['input[name="pass"]', 'input[name="password"]', 'input[autocomplete="current-password"]', 'input[type="password"]'];
+    for (const sel of passwordSelectors) {
+      try {
+        const el = page.locator(sel).first();
+        if (await el.count() > 0) {
+          await el.waitFor({ timeout: 5000 });
+          await el.fill(IG_PASSWORD);
+          passwordFilled = true;
+          console.log(`  ✅ Filled password via: ${sel}`);
+          break;
+        }
+      } catch (e) {}
+    }
+
+    if (!passwordFilled) {
       console.log('  ⚠️ Could not find password field');
       await context.close();
       await browser.close();
       return false;
     }
 
-    // Click login (input is invisible, use keyboard)
-    await page.keyboard.press('Enter');
-    await page.waitForTimeout(8000);
+    await page.waitForTimeout(500);
 
-    // Check if logged in
-    let success = false;
+    // Try clicking submit button first, fall back to Enter
+    let clicked = false;
     try {
-      const url = page.url();
-      success = !url.includes('accounts/login');
-      if (!success) {
-        await page.waitForTimeout(5000);
-        success = !page.url().includes('accounts/login');
+      const submitBtn = page.locator('button[type="submit"], input[type="submit"]').first();
+      if (await submitBtn.count() > 0) {
+        await submitBtn.click({ timeout: 5000, force: true });
+        clicked = true;
       }
     } catch (e) {}
+    if (!clicked) {
+      await page.keyboard.press('Enter');
+    }
+    await page.waitForTimeout(10000);
+
+    // Check if logged in (may redirect away from login page)
+    let success = false;
+    const currentUrl = page.url();
+    console.log('  Post-login URL:', currentUrl);
+    success = !currentUrl.includes('accounts/login');
 
     if (!success) {
-      console.log('  ❌ Login failed — wrong credentials or challenge');
+      await page.waitForTimeout(8000);
+      const url2 = page.url();
+      console.log('  URL after extra wait:', url2);
+      success = !url2.includes('accounts/login');
+    }
+
+    if (!success) {
+      // Check for checkpoint/challenge
+      const bodyText = await page.evaluate(() => document.body.innerText.substring(0, 500));
+      console.log('  Page text:', bodyText.replace(/\n/g, ' ').substring(0, 200));
+      console.log('  ❌ Login failed');
       await context.close();
       await browser.close();
       return false;
@@ -124,7 +195,7 @@ async function loginToInstagram() {
 
     // Dismiss popups
     try { await page.locator('button:has-text("Not Now")').first().click({ timeout: 4000 }); await page.waitForTimeout(1000); } catch (e) {}
-    try { await page.locator('button:has-text("Not Now")').first().click({ timeout: 4000 }); await page.waitForTimeout(1000); } catch (e) {}
+    try { await page.locator('button:has-text("Save Info")').first().click({ timeout: 3000 }); await page.waitForTimeout(1000); } catch (e) {}
 
     const cookies = await context.cookies();
     fs.writeFileSync(STATE_FILE, JSON.stringify(cookies, null, 2));
