@@ -413,23 +413,76 @@ async function searchInstagram(query, mediaType = 'all', limit = 10) {
   try {
     if (isReels) {
       console.log(`📱 Searching reels for: "${query}" (rotation: ${ROTATION_WORDS[rotationIndex % ROTATION_WORDS.length]})`);
+
+      // Instagram search can land on various tabs — let's try multiple URLs
+      // First, go to the general search page
       await page.goto(
         `https://www.instagram.com/search?q=${freshQuery}${cacheBust}`,
         { waitUntil: 'domcontentloaded', timeout: 25000 }
       );
-      await page.waitForTimeout(4000);
+      await page.waitForTimeout(6000);
 
+      // DEBUG: dump search page structure
+      const searchDebug = await page.evaluate(() => {
+        return {
+          url: location.href,
+          reelLinks: document.querySelectorAll('a[href*="/reel/"]').length,
+          postLinks: document.querySelectorAll('a[href*="/p/"]').length,
+          tabTexts: [...document.querySelectorAll('div[role="tab"], span, a, div')].slice(0, 20).map(el => el.textContent?.substring(0, 30)).filter(Boolean),
+        };
+      }).catch(() => ({}));
+      console.log(`  Search page: ${JSON.stringify(searchDebug)}`);
+
+      // Try clicking reels tab — Instagram's tabs use role="tab" or specific links
+      let onReelsTab = false;
+
+      // Method 1: Click anything that says "Reels"
       try {
-        const reelsTab = page.locator('a[href*="/reels/"], a:has-text("Reels"), div:has-text("Reels")').first();
-        await reelsTab.click({ timeout: 5000 });
-        await page.waitForTimeout(3000);
+        const reelsNav = page.locator(
+          'a[href*="/reels/"], ' +
+          'span:has-text("Reels"), ' +
+          'div[role="tab"]:has-text("Reels"), ' +
+          'a[role="tab"]:has-text("Reels"), ' +
+          'nav a:has-text("Reels"), ' +
+          'div:has-text("Reels")'
+        ).first();
+        if (await reelsNav.isVisible({ timeout: 3000 }).catch(() => false)) {
+          await reelsNav.click();
+          await page.waitForTimeout(4000);
+          onReelsTab = true;
+          console.log('  ✅ Clicked Reels tab');
+        }
       } catch (e) {}
 
-      for (let i = 0; i < 5 && results.length < maxResults * 2; i++) {
-        await page.evaluate(() => window.scrollBy(0, 800));
-        await page.waitForTimeout(2000);
+      // Method 2: If reels tab not found, search might have landed on reels already
+      if (!onReelsTab) {
+        const reelsOnPage = await page.evaluate(() => {
+          return document.querySelectorAll('a[href*="/reel/"]').length;
+        }).catch(() => 0);
+
+        if (reelsOnPage > 0) {
+          onReelsTab = true;
+          console.log(`  ✅ Already on reels (${reelsOnPage} found)`);
+        } else {
+          // Method 3: Try direct reels search URL
+          console.log('  Trying direct reels URL...');
+          await page.goto(
+            `https://www.instagram.com/reels/search/?q=${encodeURIComponent(query)}`,
+            { waitUntil: 'domcontentloaded', timeout: 25000 }
+          );
+          await page.waitForTimeout(6000);
+        }
       }
 
+      // Scroll to trigger lazy loading
+      console.log('  Scrolling for reels...');
+      for (let i = 0; i < 8 && results.length < maxResults * 2; i++) {
+        await page.evaluate(() => window.scrollBy(0, 800));
+        await page.waitForTimeout(2500);
+      }
+
+      // Extract reels — note: page.evaluate only accepts ONE argument
+      const reelMax = maxResults * 2;
       const reels = await page.evaluate((maxRes) => {
         const items = [];
         const links = document.querySelectorAll('a[href*="/reel/"]');
@@ -448,7 +501,7 @@ async function searchInstagram(query, mediaType = 'all', limit = 10) {
           });
         }
         return items;
-      }, maxResults * 2);
+      }, reelMax);
       results.push(...reels);
 
     } else {
@@ -457,13 +510,44 @@ async function searchInstagram(query, mediaType = 'all', limit = 10) {
         `https://www.instagram.com/search?q=${freshQuery}${cacheBust}`,
         { waitUntil: 'domcontentloaded', timeout: 25000 }
       );
-      await page.waitForTimeout(5000);
+      await page.waitForTimeout(6000);
 
+      // DEBUG: dump search page structure
+      const searchDebug = await page.evaluate(() => {
+        return {
+          url: location.href,
+          reelLinks: document.querySelectorAll('a[href*="/reel/"]').length,
+          postLinks: document.querySelectorAll('a[href*="/p/"]').length,
+          tabTexts: [...document.querySelectorAll('div[role="tab"], span, a, div')].slice(0, 20).map(el => el.textContent?.substring(0, 30)).filter(Boolean),
+        };
+      }).catch(() => ({}));
+      console.log(`  Search page: ${JSON.stringify(searchDebug)}`);
+
+      // Look for posts — try clicking Top/Posts tab
+      let onPostsTab = false;
       try {
-        const topTab = page.locator('a:has-text("Top"), a:has-text("Posts"), div:has-text("Posts")').first();
-        await topTab.click({ timeout: 5000 });
-        await page.waitForTimeout(3000);
+        const postsTab = page.locator(
+          'a[href*="/search"], ' +
+          'div[role="tab"]:has-text("Top"), ' +
+          'span:has-text("Top"), ' +
+          'span:has-text("Posts"), ' +
+          'a:has-text("Top")'
+        ).first();
+        if (await postsTab.isVisible({ timeout: 3000 }).catch(() => false)) {
+          await postsTab.click();
+          await page.waitForTimeout(3000);
+          onPostsTab = true;
+          console.log('  ✅ Clicked Top/Posts tab');
+        }
       } catch (e) {}
+
+      // Check if we have posts already
+      if (!onPostsTab) {
+        const postsOnPage = await page.evaluate(() => {
+          return document.querySelectorAll('a[href*="/p/"]').length;
+        }).catch(() => 0);
+        if (postsOnPage > 0) console.log(`  ✅ Already showing posts (${postsOnPage})`);
+      }
 
       for (let i = 0; i < 5 && results.length < maxResults * 2; i++) {
         await page.evaluate(() => window.scrollBy(0, 800));
@@ -737,7 +821,7 @@ async function scrapeInstagramPage(pageUrl, mediaType = 'posts', limit = 10, vir
       await page.waitForTimeout(2000);
     }
 
-    const items = await page.evaluate((maxRes, isRels) => {
+    const items = await page.evaluate(({ maxRes, isRels }) => {
       const extracted = [];
       const selector = isRels ? 'a[href*="/reel/"]' : 'a[href*="/p/"]';
       const links = document.querySelectorAll(selector);
@@ -757,7 +841,7 @@ async function scrapeInstagramPage(pageUrl, mediaType = 'posts', limit = 10, vir
         });
       }
       return extracted;
-    }, maxResults * (viralOnly ? 3 : 1), isReels);
+    }, { maxRes: maxResults * (viralOnly ? 3 : 1), isRels });
 
     results.push(...items);
 
