@@ -1,0 +1,4 @@
+node_modules/
+.env
+*.log
+instagram_auth.json
