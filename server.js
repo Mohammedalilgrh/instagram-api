@@ -10,6 +10,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const IG_USERNAME = process.env.IG_USERNAME || '';
 const IG_PASSWORD = process.env.IG_PASSWORD || '';
+const CAPSOLVER_KEY = process.env.CAPSOLVER_API_KEY || '';
 const STATE_FILE = path.join(__dirname, 'instagram_auth.json');
 const DEDUP_FILE = path.join(__dirname, 'seen_ids.json');
 
@@ -18,6 +19,56 @@ app.use(express.json({ limit: '5mb' }));
 
 let loggedIn = false;
 let loginAttempted = false;
+
+// ─── CapSolver reCAPTCHA Solver ──────────────
+async function solveRecaptcha(page) {
+  if (!CAPSOLVER_KEY) return false;
+  try {
+    const sitekey = await page.evaluate(() => {
+      return document.querySelector('.g-recaptcha')?.getAttribute('data-sitekey') ||
+             document.querySelector('[data-sitekey]')?.getAttribute('data-sitekey') || '';
+    });
+    if (!sitekey) {
+      console.log('  ⚠️ No reCAPTCHA sitekey found');
+      return false;
+    }
+    const url = page.url();
+    console.log('  🔄 Solving reCAPTCHA via CapSolver...');
+
+    const taskRes = await fetch('https://api.capsolver.com/createTask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        clientKey: CAPSOLVER_KEY,
+        task: { type: 'ReCaptchaV2Task', websiteURL: url, websiteKey: sitekey, isInvisible: false },
+      }),
+    });
+    const taskData = await taskRes.json();
+    if (taskData.errorId) { console.log('  ❌ CapSolver error:', taskData.errorDescription); return false; }
+
+    for (let i = 0; i < 60; i++) {
+      await new Promise(r => setTimeout(r, 3000));
+      const r = await fetch('https://api.capsolver.com/getTaskResult', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clientKey: CAPSOLVER_KEY, taskId: taskData.taskId }),
+      });
+      const d = await r.json();
+      if (d.status === 'ready') {
+        const token = d.solution?.gRecaptchaResponse;
+        if (!token) return false;
+        await page.evaluate((t) => {
+          let ta = document.getElementById('g-recaptcha-response');
+          if (!ta) { ta = document.createElement('textarea'); ta.id = 'g-recaptcha-response'; document.body.appendChild(ta); }
+          ta.textContent = t;
+        }, token);
+        console.log('  ✅ reCAPTCHA solved!');
+        return true;
+      }
+    }
+    return false;
+  } catch (e) { console.log('  ❌ CapSolver error:', e.message?.substring(0, 80)); return false; }
+}
 
 // ─── Dedup ─────────────────────────────────────
 let seenIds = new Set();
@@ -194,6 +245,21 @@ async function loginToInstagram() {
       const url2 = page.url();
       console.log('  URL after extra wait:', url2);
       success = !url2.includes('accounts/login');
+    }
+
+    if (!success && page.url().includes('recaptcha')) {
+      console.log('  ⚠️ reCAPTCHA detected — attempting to solve...');
+      const solved = await solveRecaptcha(page);
+      if (solved) {
+        await page.waitForTimeout(8000);
+        const url3 = page.url();
+        console.log('  URL after captcha solve:', url3);
+        success = !url3.includes('accounts/login') && !url3.includes('recaptcha');
+        if (!success) {
+          await page.waitForTimeout(5000);
+          success = !page.url().includes('accounts/login') && !page.url().includes('recaptcha');
+        }
+      }
     }
 
     if (!success) {
@@ -658,6 +724,7 @@ app.get('/', (req, res) => {
     realInstagramOnly: true,
     seenPostsCache: seenIds.size,
     setup: loggedIn ? '✅ Instagram logged in' : '⚠️  Set IG_USERNAME & IG_PASSWORD in env vars',
+    capsolver: CAPSOLVER_KEY ? '✅ CapSolver ready' : '❌ CapSolver API key not set',
     note: '100% real Instagram content only. Returns empty if not logged in.',
     endpoints: {
       search: 'GET /api/instagram/search?q=KEYWORD&count=5',
