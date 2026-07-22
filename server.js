@@ -105,7 +105,6 @@ async function loginToInstagram() {
   try {
     browser = await chromium.launch({
       headless: true,
-      channel: 'chrome',
       args: [
         '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
         '--disable-blink-features=AutomationControlled',
@@ -290,7 +289,6 @@ async function loginToInstagram() {
 async function createSession() {
   const browser = await chromium.launch({
     headless: true,
-    channel: 'chrome',
     args: [
       '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
       '--disable-blink-features=AutomationControlled',
