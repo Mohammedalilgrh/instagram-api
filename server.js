@@ -52,16 +52,29 @@ async function loginToInstagram() {
   try {
     browser = await chromium.launch({
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+      channel: 'chrome',
+      args: [
+        '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+        '--disable-blink-features=AutomationControlled',
+        '--window-size=1920,1080',
+      ],
     });
 
     const context = await browser.newContext({
-      userAgent: UA,
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36',
       viewport: { width: 1920, height: 1080 },
       locale: 'en-US',
+      timezoneId: 'America/New_York',
     });
 
     const page = await context.newPage();
+
+    // Bypass webdriver detection
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+    });
     console.log('🔑 Logging into Instagram...');
 
     // Wait for full page load with network idle for JS-heavy login
@@ -216,13 +229,26 @@ async function loginToInstagram() {
 async function createSession() {
   const browser = await chromium.launch({
     headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+    channel: 'chrome',
+    args: [
+      '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+      '--disable-blink-features=AutomationControlled',
+      '--window-size=1920,1080',
+    ],
   });
 
   const context = await browser.newContext({
-    userAgent: UA,
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36',
     viewport: { width: 1920, height: 1080 },
     locale: 'en-US',
+    timezoneId: 'America/New_York',
+  });
+
+  // Bypass webdriver detection
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => false });
+    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
   });
 
   if (fs.existsSync(STATE_FILE)) {

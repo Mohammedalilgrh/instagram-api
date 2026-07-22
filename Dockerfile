@@ -18,8 +18,8 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm install
 
-# Install ALL Playwright browsers — chromium AND chromium-headless-shell
-RUN npx playwright install --with-deps chromium
+# Install FULL Chrome (not headless shell) — more stealthy
+RUN npx playwright install --with-deps chrome
 
 COPY . .
 
