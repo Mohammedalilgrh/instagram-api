@@ -28,6 +28,9 @@
 |----------|-------|---------|
 | `IG_USERNAME` | Your Instagram username | `my_marketing_acct` |
 | `IG_PASSWORD` | Your Instagram password | `your_password` |
+| `DEEPSEEK_API_KEY` (optional) | DeepSeek AI API key for smart fallback | `sk-...` |
+
+> **🆕 DeepSeek AI:** Add a DeepSeek API key (free at platform.deepseek.com). When standard selectors find 0 results, DeepSeek AI analyzes the page and finds content intelligently.
 
 ### 3. Set Health Check (optional)
 
@@ -57,6 +60,13 @@ Render free services sleep after 15 minutes of inactivity. Set up UptimeRobot:
 ```
 https://your-app.onrender.com
 ```
+
+### 🆕 Freshness System
+Every call returns **different content automatically**:
+- **50-word rotation pool** — appends a different tag each call
+- **Dedup cache** — never repeats a post, even across server restarts
+- **Cache-busting** — unique timestamps on every URL
+- **Hashtag pages** — uses explore/tags/ for stable content extraction
 
 ### 1. Search Content (Main Endpoint)
 
@@ -258,7 +268,20 @@ Body: { "url": "https://...image_url..." }
 
 ---
 
-### 8. Scrape Any Instagram Page (Profile, Hashtag, etc.)
+### 🆕 8. DeepSeek AI Fallback (Optional but Powerful)
+
+When the API can't find content via standard selectors, it uses **DeepSeek AI** to analyze the page and extract content intelligently.
+
+**Setup:** Add `DEEPSEEK_API_KEY` to your Render env vars.
+**Get a key:** Free at [platform.deepseek.com](https://platform.deepseek.com) → API Keys → create key
+
+```
+DEEPSEEK_API_KEY = sk-your_key_here
+```
+
+---
+
+### 9. Scrape Any Instagram Page (Profile, Hashtag, etc.)
 
 Scrape ALL content from any Instagram page — a profile, a hashtag feed, a specific account's reels.
 
