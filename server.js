@@ -11,6 +11,8 @@ const IG_USERNAME = process.env.IG_USERNAME || '';
 const IG_PASSWORD = process.env.IG_PASSWORD || '';
 const STATE_FILE = path.join(__dirname, 'instagram_auth.json');
 const DEDUP_FILE = path.join(__dirname, 'seen_ids.json');
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || '';
+const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || 'deepseek-chat';
 
 app.use(cors());
 app.use(express.json({ limit: '5mb' }));
@@ -395,6 +397,117 @@ async function createSession(mobile = false) {
 }
 
 // ──────────────────────────────────────────────
+// DeepSeek AI — intelligent page analysis fallback
+// ──────────────────────────────────────────────
+
+async function deepseekAnalyzePage(page, query, mediaType) {
+  if (!DEEPSEEK_API_KEY) return [];
+
+  // Get page HTML and text
+  const pageData = await page.evaluate(() => {
+    return {
+      url: location.href,
+      title: document.title,
+      text: document.body?.innerText?.substring(0, 5000) || '',
+      html: document.body?.innerHTML?.substring(0, 8000) || '',
+      links: [...document.querySelectorAll('a[href*="/reel/"], a[href*="/p/"]')].slice(0, 20).map(a => ({
+        href: a.getAttribute('href'),
+        img: a.querySelector('img')?.src || '',
+        alt: a.querySelector('img')?.alt || '',
+      })),
+      videos: [...document.querySelectorAll('video')].slice(0, 10).map(v => ({
+        src: v.getAttribute('src'),
+        poster: v.getAttribute('poster'),
+      })),
+      imgs: [...document.querySelectorAll('img[src]')].slice(0, 20).map(i => ({
+        src: i.src,
+        alt: i.alt,
+      })),
+    };
+  }).catch(() => ({}));
+
+  if (!pageData.html && !pageData.text) return [];
+
+  console.log('  🤖 Asking DeepSeek to find content...');
+
+  try {
+    const https = require('https');
+    const body = JSON.stringify({
+      model: DEEPSEEK_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content: `You are an Instagram API that extracts content from page data.
+The user searched for "${query}" looking for ${mediaType === 'reels' ? 'REELS (video content)' : 'POSTS/IMAGES'}.
+
+Return ONLY a valid JSON array of objects. Each object must have:
+- "id": unique identifier (from URL or random)
+- "caption": text description
+- "link": full Instagram URL (add https://www.instagram.com prefix if missing)
+- ${mediaType === 'reels' ? '"videoUrl": video source URL or poster URL' : '"image": image source URL'}
+- "type": "${mediaType === 'reels' ? 'reel' : 'image'}"
+- "confidence": number 0-100 how confident this matches the query
+
+Max 10 items. Return ONLY the JSON array, no other text. If nothing relevant, return [].`
+        },
+        {
+          role: 'user',
+          content: `Page URL: ${pageData.url}
+Page title: ${pageData.title}
+
+Links found: ${JSON.stringify(pageData.links)}
+${mediaType === 'reels' ? `Videos: ${JSON.stringify(pageData.videos)}` : `Images: ${JSON.stringify(pageData.imgs)}`}
+Page text (first 3000 chars): ${pageData.text.substring(0, 3000)}`
+        },
+      ],
+      temperature: 0.1,
+      max_tokens: 2000,
+    });
+
+    const result = await new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: 'api.deepseek.com',
+        path: '/v1/chat/completions',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${DEEPSEEK_API_KEY}`,
+        },
+        timeout: 30000,
+      }, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(data);
+            resolve(parsed);
+          } catch (e) { reject(new Error('Parse failed')); }
+        });
+      });
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
+      req.write(body);
+      req.end();
+    });
+
+    const content = result?.choices?.[0]?.message?.content || '';
+    // Parse JSON from the response (handle markdown-wrapped JSON)
+    const jsonMatch = content.match(/\[[\s\S]*\]/);
+    if (jsonMatch) {
+      const items = JSON.parse(jsonMatch[0]);
+      if (Array.isArray(items) && items.length > 0) {
+        console.log(`  ✅ DeepSeek found ${items.length} items`);
+        return items.filter(i => i.confidence > 30).slice(0, 10);
+      }
+    }
+    return [];
+  } catch (err) {
+    console.log(`  ⚠️ DeepSeek error: ${err.message}`);
+    return [];
+  }
+}
+
+// ──────────────────────────────────────────────
 // Search Instagram — with freshness rotation
 // ──────────────────────────────────────────────
 
@@ -412,87 +525,65 @@ async function searchInstagram(query, mediaType = 'all', limit = 10) {
 
   try {
     if (isReels) {
-      console.log(`📱 Searching reels for: "${query}" (rotation: ${ROTATION_WORDS[rotationIndex % ROTATION_WORDS.length]})`);
+      console.log(`📱 Searching reels for: "${query}"`);
 
-      // Instagram search can land on various tabs — let's try multiple URLs
-      // First, go to the general search page
-      await page.goto(
-        `https://www.instagram.com/search?q=${freshQuery}${cacheBust}`,
-        { waitUntil: 'domcontentloaded', timeout: 25000 }
-      );
-      await page.waitForTimeout(6000);
-
-      // DEBUG: dump search page structure
-      const searchDebug = await page.evaluate(() => {
-        return {
-          url: location.href,
-          reelLinks: document.querySelectorAll('a[href*="/reel/"]').length,
-          postLinks: document.querySelectorAll('a[href*="/p/"]').length,
-          tabTexts: [...document.querySelectorAll('div[role="tab"], span, a, div')].slice(0, 20).map(el => el.textContent?.substring(0, 30)).filter(Boolean),
-        };
-      }).catch(() => ({}));
-      console.log(`  Search page: ${JSON.stringify(searchDebug)}`);
-
-      // Try clicking reels tab — Instagram's tabs use role="tab" or specific links
-      let onReelsTab = false;
-
-      // Method 1: Click anything that says "Reels"
-      try {
-        const reelsNav = page.locator(
-          'a[href*="/reels/"], ' +
-          'span:has-text("Reels"), ' +
-          'div[role="tab"]:has-text("Reels"), ' +
-          'a[role="tab"]:has-text("Reels"), ' +
-          'nav a:has-text("Reels"), ' +
-          'div:has-text("Reels")'
-        ).first();
-        if (await reelsNav.isVisible({ timeout: 3000 }).catch(() => false)) {
-          await reelsNav.click();
-          await page.waitForTimeout(4000);
-          onReelsTab = true;
-          console.log('  ✅ Clicked Reels tab');
-        }
-      } catch (e) {}
-
-      // Method 2: If reels tab not found, search might have landed on reels already
-      if (!onReelsTab) {
-        const reelsOnPage = await page.evaluate(() => {
-          return document.querySelectorAll('a[href*="/reel/"]').length;
-        }).catch(() => 0);
-
-        if (reelsOnPage > 0) {
-          onReelsTab = true;
-          console.log(`  ✅ Already on reels (${reelsOnPage} found)`);
-        } else {
-          // Method 3: Try direct reels search URL
-          console.log('  Trying direct reels URL...');
-          await page.goto(
-            `https://www.instagram.com/reels/search/?q=${encodeURIComponent(query)}`,
-            { waitUntil: 'domcontentloaded', timeout: 25000 }
-          );
-          await page.waitForTimeout(6000);
+      // Instagram reels work as a TikTok-style feed at /reels/
+      // For search-based reels, use the reels search URL
+      const urls = [
+        `https://www.instagram.com/reels/search/?q=${encodeURIComponent(query)}`,
+        `https://www.instagram.com/reels/`,
+      ];
+      // Try each URL
+      let contentFound = false;
+      for (const url of urls) {
+        if (contentFound) break;
+        console.log(`  Trying: ${url}`);
+        try {
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+          await page.waitForTimeout(8000);
+          // Check if page has reel links
+          const count = await page.evaluate(() => {
+            return document.querySelectorAll('a[href*="/reel/"], article video, video[src]').length;
+          }).catch(() => 0);
+          if (count > 0) {
+            contentFound = true;
+            console.log(`  ✅ Found ${count} reel elements`);
+          }
+        } catch (e) {
+          console.log(`  ⚠️ URL failed, trying next`);
         }
       }
 
-      // Scroll to trigger lazy loading
-      console.log('  Scrolling for reels...');
-      for (let i = 0; i < 8 && results.length < maxResults * 2; i++) {
-        await page.evaluate(() => window.scrollBy(0, 800));
-        await page.waitForTimeout(2500);
+      // If nothing found on reels pages, try hashtag page
+      if (!contentFound) {
+        const tag = query.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+        const hashtagUrl = `https://www.instagram.com/explore/tags/${tag}/`;
+        console.log(`  Trying hashtag: ${hashtagUrl}`);
+        await page.goto(hashtagUrl, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+        await page.waitForTimeout(8000);
       }
 
-      // Extract reels — note: page.evaluate only accepts ONE argument
+      // Heavy scroll to load content
+      console.log('  Scrolling...');
+      for (let i = 0; i < 10; i++) {
+        await page.evaluate(() => window.scrollBy(0, 1000));
+        await page.waitForTimeout(2000);
+      }
+
+      // Extract using multiple methods
       const reelMax = maxResults * 2;
       const reels = await page.evaluate((maxRes) => {
         const items = [];
-        const links = document.querySelectorAll('a[href*="/reel/"]');
-        for (const link of links) {
+
+        // Method 1: Links to /reel/
+        const reelLinks = document.querySelectorAll('a[href*="/reel/"]');
+        for (const link of reelLinks) {
           if (items.length >= maxRes) break;
           const href = link.getAttribute('href');
-          const video = link.querySelector('video');
           const img = link.querySelector('img');
+          const video = link.querySelector('video');
           items.push({
-            id: href ? href.split('/reel/')[1]?.split('/')[0] || '' : '',
+            id: href?.split('/reel/')[1]?.split('/')[0] || '',
             caption: img?.alt || '',
             thumbnail: img?.src || '',
             videoUrl: video?.src || '',
@@ -500,78 +591,135 @@ async function searchInstagram(query, mediaType = 'all', limit = 10) {
             type: 'reel',
           });
         }
+
+        // Method 2: Look for videos inside articles (newer IG layout)
+        if (items.length < maxRes) {
+          const articles = document.querySelectorAll('article, div[role="presentation"]');
+          for (const article of articles) {
+            if (items.length >= maxRes) break;
+            const video = article.querySelector('video');
+            const img = article.querySelector('img');
+            const link = article.querySelector('a');
+            if (video || img) {
+              const href = link?.getAttribute('href') || '';
+              items.push({
+                id: href?.split('/reel/')[1]?.split('/')[0] || href?.split('/p/')[1]?.split('/')[0] || '',
+                caption: img?.alt || video?.title || '',
+                thumbnail: img?.src || '',
+                videoUrl: video?.src || '',
+                link: href.startsWith('/') ? `https://www.instagram.com${href}` : href,
+                type: 'reel',
+              });
+            }
+          }
+        }
+
+        // Method 3: Standalone video elements with poster
+        if (items.length < maxRes) {
+          const videos = document.querySelectorAll('video[poster], video[src]');
+          for (const video of videos) {
+            if (items.length >= maxRes) break;
+            const poster = video.getAttribute('poster');
+            const src = video.getAttribute('src');
+            const parentLink = video.closest('a');
+            const href = parentLink?.getAttribute('href') || '';
+            if (src && !items.some(i => i.videoUrl === src)) {
+              items.push({
+                id: href?.split('/reel/')[1]?.split('/')[0] || '',
+                caption: '',
+                thumbnail: poster || '',
+                videoUrl: src,
+                link: href.startsWith('/') ? `https://www.instagram.com${href}` : href,
+                type: 'reel',
+              });
+            }
+          }
+        }
+
         return items;
       }, reelMax);
       results.push(...reels);
+      console.log(`  Extracted ${reels.length} reels`);
 
     } else {
-      console.log(`🖼️ Searching images for: "${query}" (rotation: ${ROTATION_WORDS[rotationIndex % ROTATION_WORDS.length]})`);
-      await page.goto(
-        `https://www.instagram.com/search?q=${freshQuery}${cacheBust}`,
-        { waitUntil: 'domcontentloaded', timeout: 25000 }
-      );
-      await page.waitForTimeout(6000);
+      // ── IMAGE SEARCH ──
+      console.log(`🖼️ Searching images for: "${query}"`);
 
-      // DEBUG: dump search page structure
-      const searchDebug = await page.evaluate(() => {
-        return {
-          url: location.href,
-          reelLinks: document.querySelectorAll('a[href*="/reel/"]').length,
-          postLinks: document.querySelectorAll('a[href*="/p/"]').length,
-          tabTexts: [...document.querySelectorAll('div[role="tab"], span, a, div')].slice(0, 20).map(el => el.textContent?.substring(0, 30)).filter(Boolean),
-        };
-      }).catch(() => ({}));
-      console.log(`  Search page: ${JSON.stringify(searchDebug)}`);
+      // Use hashtag page directly — more stable than search page
+      const tag = query.replace(/[^a-zA-Z0-9 ]/g, '').trim().split(' ')[0].toLowerCase();
+      const hashtagUrl = `https://www.instagram.com/explore/tags/${tag}/`;
+      console.log(`  Using hashtag page: ${hashtagUrl}`);
 
-      // Look for posts — try clicking Top/Posts tab
-      let onPostsTab = false;
-      try {
-        const postsTab = page.locator(
-          'a[href*="/search"], ' +
-          'div[role="tab"]:has-text("Top"), ' +
-          'span:has-text("Top"), ' +
-          'span:has-text("Posts"), ' +
-          'a:has-text("Top")'
-        ).first();
-        if (await postsTab.isVisible({ timeout: 3000 }).catch(() => false)) {
-          await postsTab.click();
-          await page.waitForTimeout(3000);
-          onPostsTab = true;
-          console.log('  ✅ Clicked Top/Posts tab');
-        }
-      } catch (e) {}
+      await page.goto(hashtagUrl, { waitUntil: 'domcontentloaded', timeout: 25000 }).catch(async () => {
+        // Fallback to search
+        console.log('  Hashtag failed, trying search...');
+        await page.goto(
+          `https://www.instagram.com/search?q=${freshQuery}${cacheBust}`,
+          { waitUntil: 'domcontentloaded', timeout: 25000 }
+        ).catch(() => {});
+      });
+      await page.waitForTimeout(8000);
 
-      // Check if we have posts already
-      if (!onPostsTab) {
-        const postsOnPage = await page.evaluate(() => {
-          return document.querySelectorAll('a[href*="/p/"]').length;
-        }).catch(() => 0);
-        if (postsOnPage > 0) console.log(`  ✅ Already showing posts (${postsOnPage})`);
-      }
-
-      for (let i = 0; i < 5 && results.length < maxResults * 2; i++) {
-        await page.evaluate(() => window.scrollBy(0, 800));
+      // Scroll for more content
+      console.log('  Scrolling...');
+      for (let i = 0; i < 8; i++) {
+        await page.evaluate(() => window.scrollBy(0, 1000));
         await page.waitForTimeout(2000);
       }
 
+      // Extract posts with multiple methods
+      const postMax = maxResults * 2;
       const posts = await page.evaluate((maxRes) => {
         const items = [];
-        const links = document.querySelectorAll('a[href*="/p/"]');
-        for (const link of links) {
+
+        // Method 1: Standard /p/ links
+        const postLinks = document.querySelectorAll('a[href*="/p/"]');
+        for (const link of postLinks) {
           if (items.length >= maxRes) break;
           const href = link.getAttribute('href');
           const img = link.querySelector('img');
-          items.push({
-            id: href ? href.split('/p/')[1]?.split('/')[0] || '' : '',
-            caption: img?.alt || '',
-            image: img?.src || '',
-            link: href ? `https://www.instagram.com${href}` : '',
-            type: 'image',
-          });
+          if (img?.src) {
+            items.push({
+              id: href?.split('/p/')[1]?.split('/')[0] || '',
+              caption: img.alt || '',
+              image: img.src,
+              link: href ? `https://www.instagram.com${href}` : '',
+              type: 'image',
+            });
+          }
         }
+
+        // Method 2: Any linked image inside articles
+        if (items.length < maxRes) {
+          const imgs = document.querySelectorAll('article img[src], div[role="presentation"] img[src]');
+          const seen = new Set();
+          for (const img of imgs) {
+            if (items.length >= maxRes) break;
+            if (seen.has(img.src) || !img.src) continue;
+            seen.add(img.src);
+            const parentLink = img.closest('a');
+            const href = parentLink?.getAttribute('href') || '';
+            items.push({
+              id: href?.split('/p/')[1]?.split('/')[0] || '',
+              caption: img.alt || '',
+              image: img.src,
+              link: href.startsWith('/') ? `https://www.instagram.com${href}` : href,
+              type: 'image',
+            });
+          }
+        }
+
         return items;
-      }, maxResults * 2);
+      }, postMax);
       results.push(...posts);
+      console.log(`  Extracted ${posts.length} images`);
+    }
+
+    // If no results found, try DeepSeek AI analysis
+    if (results.length === 0 && DEEPSEEK_API_KEY) {
+      console.log('  ⚠️ No results from selectors, trying DeepSeek AI...');
+      const aiResults = await deepseekAnalyzePage(page, query, mediaType);
+      results.push(...aiResults);
     }
 
     await context.close();
