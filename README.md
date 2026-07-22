@@ -57,6 +57,65 @@ Render free services sleep after 15 minutes of inactivity. Set up UptimeRobot:
 https://your-app.onrender.com
 ```
 
+### ⭐ MAIN ENDPOINT: Viral Quotes with Auto-OCR Text Extraction
+
+**This is the endpoint you should use.** It:
+1. **Rotates through 50 different quote hashtags** — every call gets different content from different niches (quotes, motivation, inspiration, success, wisdom, life, goals, etc.)
+2. **Opens each post individually** to extract clean media URLs (no ugly long video URLs)
+3. **Auto-extracts text via OCR** — every result gets `ocr_text` and `ocr_confidence` so you get the quote as readable text
+4. **Dedup cache** (`seen_ids.json`) — never returns the same post twice, ever
+5. **Freshness guarantee** — call it 1000 times, get 1000 different results
+
+**Method:** GET
+**URL:** `/api/instagram/viral-quotes`
+
+| Parameter | Type | Description | Default |
+|-----------|------|-------------|---------|
+| `count` | number | Number of quotes to return (1-10) | `3` |
+
+**n8n setup:**
+- Method: GET
+- URL: `https://your-app.onrender.com/api/instagram/viral-quotes?count=5`
+- Authentication: None
+- Response format: JSON
+
+**Response:**
+```json
+{
+  "success": true,
+  "count": 3,
+  "data": [
+    {
+      "id": "DHxYkZ...",
+      "image": "https://...cdninstagram.com/...",
+      "link": "https://www.instagram.com/p/DHxYkZ...",
+      "type": "image",
+      "caption": "Believe in yourself... #quote",
+      "ocr_text": "The only way to do great work is to love what you do.",
+      "ocr_confidence": 92
+    },
+    {
+      "id": "DHyAbC...",
+      "image": "https://...cdninstagram.com/...",
+      "link": "https://www.instagram.com/reel/DHyAbC...",
+      "type": "reel",
+      "caption": "Success is not final... #motivation",
+      "ocr_text": "Success is not final, failure is not fatal: it is the courage to continue that counts.",
+      "ocr_confidence": 88
+    }
+  ]
+}
+```
+
+**n8n Workflow — Auto-Post Quotes to Google Sheets:**
+1. Schedule (daily)
+2. HTTP Request → GET `/api/instagram/viral-quotes?count=5`
+3. Loop over each item in `data`
+4. Extract `ocr_text`, `image`, `link` from each
+5. Save to Google Sheets: quote_text | image_url | post_link
+
+---
+
 ### 1. Search Content (Main Endpoint)
 
 **Method:** GET

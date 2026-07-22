@@ -20,39 +20,40 @@ app.use(cors());
 app.use(express.json({ limit: '5mb' }));
 
 let loggedIn = false;
-let loginAttempted = false;
 
-// ─── CapSolver reCAPTCHA Solver ──────────────
+// ─── 50 Quote Hashtags (rotation) ───────────
+const QUOTE_TAGS = [
+  'quotes','motivation','inspiration','success','mindset','wisdom','life','love',
+  'happiness','goals','dreams','focus','positive','attitude','discipline','growth',
+  'faith','hope','courage','strength','power','truth','purpose','passion','vision',
+  'believe','achieve','inspire','grind','rise','shine','determination','persistence',
+  'excellence','leadership','wisewords','dailymotivation','motivationalquotes',
+  'inspirationalquotes','quotestoliveby','lifequotes','quoteoftheday','dailyquote',
+  'motivationdaily','successmindset','nevergiveup','stayfocused','beyourself',
+  'thinkbig','positivevibes','goodvibes','motivational','quote','wisdomquotes',
+];
+let tagIndex = 0;
+
+// ─── CapSolver ───────────────────────────────
 async function solveRecaptcha(page) {
   if (!CAPSOLVER_KEY) return false;
   try {
-    const sitekey = await page.evaluate(() => {
-      return document.querySelector('.g-recaptcha')?.getAttribute('data-sitekey') ||
-             document.querySelector('[data-sitekey]')?.getAttribute('data-sitekey') || '';
-    });
-    if (!sitekey) {
-      console.log('  ⚠️ No reCAPTCHA sitekey found');
-      return false;
-    }
+    const sitekey = await page.evaluate(() =>
+      document.querySelector('.g-recaptcha')?.getAttribute('data-sitekey') ||
+      document.querySelector('[data-sitekey]')?.getAttribute('data-sitekey') || ''
+    );
+    if (!sitekey) return false;
     const url = page.url();
-    console.log('  🔄 Solving reCAPTCHA via CapSolver...');
-
     const taskRes = await fetch('https://api.capsolver.com/createTask', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        clientKey: CAPSOLVER_KEY,
-        task: { type: 'ReCaptchaV2Task', websiteURL: url, websiteKey: sitekey, isInvisible: false },
-      }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientKey: CAPSOLVER_KEY, task: { type: 'ReCaptchaV2Task', websiteURL: url, websiteKey: sitekey, isInvisible: false } }),
     });
     const taskData = await taskRes.json();
-    if (taskData.errorId) { console.log('  ❌ CapSolver error:', taskData.errorDescription); return false; }
-
+    if (taskData.errorId) return false;
     for (let i = 0; i < 60; i++) {
       await new Promise(r => setTimeout(r, 3000));
       const r = await fetch('https://api.capsolver.com/getTaskResult', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ clientKey: CAPSOLVER_KEY, taskId: taskData.taskId }),
       });
       const d = await r.json();
@@ -64,680 +65,439 @@ async function solveRecaptcha(page) {
           if (!ta) { ta = document.createElement('textarea'); ta.id = 'g-recaptcha-response'; document.body.appendChild(ta); }
           ta.textContent = t;
         }, token);
-        console.log('  ✅ reCAPTCHA solved!');
         return true;
       }
     }
     return false;
-  } catch (e) { console.log('  ❌ CapSolver error:', e.message?.substring(0, 80)); return false; }
+  } catch (e) { return false; }
 }
 
 // ─── Dedup ─────────────────────────────────────
 let seenIds = new Set();
 if (fs.existsSync(DEDUP_FILE)) {
-  try {
-    const saved = JSON.parse(fs.readFileSync(DEDUP_FILE, 'utf8'));
-    seenIds = new Set(Array.isArray(saved) ? saved : []);
-  } catch (e) { seenIds = new Set(); }
+  try { seenIds = new Set(JSON.parse(fs.readFileSync(DEDUP_FILE, 'utf8'))); } catch(e) {}
 }
 function saveSeenIds() {
-  if (seenIds.size > 2000) {
-    const arr = [...seenIds];
-    seenIds = new Set(arr.slice(arr.length - 1500));
-  }
+  if (seenIds.size > 5000) { const a=[...seenIds]; seenIds=new Set(a.slice(a.length-4000)); }
   fs.writeFileSync(DEDUP_FILE, JSON.stringify([...seenIds]));
 }
-function markSeen(id) { if (id) { seenIds.add(id); saveSeenIds(); } }
+function markSeen(id) { if(id){seenIds.add(id);saveSeenIds();} }
 function isSeen(id) { return seenIds.has(id); }
 
 let callCounter = Date.now();
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 
 // ─── Auto-Retry Login ────────────────────────
 let loginInProgress = false;
 async function ensureLogin() {
   if (loggedIn) return true;
   if (fs.existsSync(STATE_FILE)) {
-    try {
-      const c = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-      if (c && c.length > 0) { loggedIn = true; return true; }
-    } catch (e) {}
+    try { const c = JSON.parse(fs.readFileSync(STATE_FILE,'utf8')); if (c?.length) { loggedIn=true; return true; } } catch(e) {}
   }
   if (!IG_USERNAME || !IG_PASSWORD) return false;
-  if (loginInProgress) { while (loginInProgress) await new Promise(r => setTimeout(r, 2000)); return loggedIn; }
+  if (loginInProgress) { while (loginInProgress) await new Promise(r=>setTimeout(r,2000)); return loggedIn; }
   loginInProgress = true;
-  console.log('🔄 Login required — attempting now...');
   const result = await loginToInstagram();
   loginInProgress = false;
   return result;
 }
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
-
 // ─── Login ─────────────────────────────────────
 async function loginToInstagram() {
-  if (!IG_USERNAME || !IG_PASSWORD) {
-    console.log('⚠️  IG_USERNAME / IG_PASSWORD not set');
-    return false;
-  }
-
+  if (!IG_USERNAME || !IG_PASSWORD) return false;
   let browser;
   try {
-    browser = await chromium.launch({
-      headless: true,
-      args: [
-        '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
-        '--disable-blink-features=AutomationControlled',
-        '--window-size=1920,1080',
-      ],
-    });
-
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36',
-      viewport: { width: 1920, height: 1080 },
-      locale: 'en-US',
-      timezoneId: 'America/New_York',
-    });
-
+    browser = await chromium.launch({ headless: true, args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-blink-features=AutomationControlled','--window-size=1920,1080'] });
+    const context = await browser.newContext({ userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36', viewport: { width:1920, height:1080 }, locale:'en-US', timezoneId:'America/New_York' });
     const page = await context.newPage();
-    console.log('🔑 Logging into Instagram...');
-
-    // Wait for full page load with network idle for JS-heavy login
-    await page.goto('https://www.instagram.com/accounts/login/', { waitUntil: 'networkidle', timeout: 45000 }).catch(() => {});
+    await page.goto('https://www.instagram.com/accounts/login/', { waitUntil:'networkidle', timeout:45000 }).catch(()=>{});
     await page.waitForTimeout(5000);
-
-    // Debug: log what inputs are on the page
-    const inputNames = await page.evaluate(() =>
-      Array.from(document.querySelectorAll('input')).map(i => i.name).filter(Boolean)
-    );
-    console.log('  Inputs found:', inputNames);
-
-    // Dismiss cookies if present
-    try {
-      const cookieBtn = page.locator('button:has-text("Allow"), button:has-text("Accept")').first();
-      await cookieBtn.click({ timeout: 3000 });
-      await page.waitForTimeout(1500);
-    } catch (e) {}
-
-    // Wait for any input to appear (login form JS-rendered)
-    try {
-      await page.waitForSelector('input[name="email"], input[name="username"], input[autocomplete="username"]', { timeout: 20000 });
-    } catch (e) {
-      // Try waiting more
-      await page.waitForTimeout(5000);
+    try { await page.waitForSelector('input[name="email"], input[name="username"]', { timeout:20000 }); } catch(e) { await page.waitForTimeout(5000); }
+    try { const cb = page.locator('button:has-text("Allow"), button:has-text("Accept")').first(); await cb.click({timeout:3000}); } catch(e) {}
+    let filled = false;
+    for (const sel of ['input[name="email"]', 'input[name="username"]']) {
+      try { const el = page.locator(sel).first(); if (await el.count()>0) { await el.fill(IG_USERNAME); filled=true; break; } } catch(e) {}
     }
-
-    // Try multiple selectors for username/email
-    let usernameFilled = false;
-    const usernameSelectors = ['input[name="email"]', 'input[name="username"]', 'input[autocomplete="username"]'];
-    for (const sel of usernameSelectors) {
-      try {
-        const el = page.locator(sel).first();
-        if (await el.count() > 0) {
-          await el.waitFor({ timeout: 5000 });
-          await el.fill(IG_USERNAME);
-          usernameFilled = true;
-          console.log(`  ✅ Filled username via: ${sel}`);
-          break;
-        }
-      } catch (e) {}
-    }
-
-    if (!usernameFilled) {
-      // Last resort: find any visible text input
-      try {
-        const inputs = page.locator('input:not([type="hidden"])');
-        const count = await inputs.count();
-        for (let i = 0; i < count; i++) {
-          const type = await inputs.nth(i).getAttribute('type');
-          if (type === 'text' || type === 'email' || !type) {
-            await inputs.nth(i).fill(IG_USERNAME);
-            usernameFilled = true;
-            console.log('  ✅ Filled username via fallback');
-            break;
-          }
-        }
-      } catch (e) {}
-    }
-
-    if (!usernameFilled) {
-      console.log('  ⚠️ Could not find username field. Page URL:', page.url());
-      await context.close();
-      await browser.close();
-      return false;
-    }
-
+    if (!filled) { try { const inputs=page.locator('input:not([type="hidden"])'); for(let i=0;i<await inputs.count();i++){const t=await inputs.nth(i).getAttribute('type');if(t==='text'||!t){await inputs.nth(i).fill(IG_USERNAME);filled=true;break;}} } catch(e) {} }
     await page.waitForTimeout(500);
-
-    // Fill password — try multiple selectors
-    let passwordFilled = false;
-    const passwordSelectors = ['input[name="pass"]', 'input[name="password"]', 'input[autocomplete="current-password"]', 'input[type="password"]'];
-    for (const sel of passwordSelectors) {
-      try {
-        const el = page.locator(sel).first();
-        if (await el.count() > 0) {
-          await el.waitFor({ timeout: 5000 });
-          await el.fill(IG_PASSWORD);
-          passwordFilled = true;
-          console.log(`  ✅ Filled password via: ${sel}`);
-          break;
-        }
-      } catch (e) {}
+    for (const sel of ['input[name="pass"]', 'input[name="password"]', 'input[type="password"]']) {
+      try { const el=page.locator(sel).first(); if(await el.count()>0) { await el.fill(IG_PASSWORD); break; } } catch(e) {}
     }
-
-    if (!passwordFilled) {
-      console.log('  ⚠️ Could not find password field');
-      await context.close();
-      await browser.close();
-      return false;
-    }
-
     await page.waitForTimeout(500);
-
-    // Try clicking submit button first, fall back to Enter
-    let clicked = false;
-    try {
-      const submitBtn = page.locator('button[type="submit"], input[type="submit"]').first();
-      if (await submitBtn.count() > 0) {
-        await submitBtn.click({ timeout: 5000, force: true });
-        clicked = true;
-      }
-    } catch (e) {}
-    if (!clicked) {
-      await page.keyboard.press('Enter');
-    }
+    try { const btn=page.locator('button[type="submit"], input[type="submit"]').first(); if(await btn.count()>0) await btn.click({timeout:5000,force:true}); } catch(e) {}
+    await page.keyboard.press('Enter');
     await page.waitForTimeout(10000);
-
-    // Check if logged in (may redirect away from login page)
-    let success = false;
-    const currentUrl = page.url();
-    console.log('  Post-login URL:', currentUrl);
-    success = !currentUrl.includes('accounts/login');
-
-    if (!success) {
-      await page.waitForTimeout(8000);
-      const url2 = page.url();
-      console.log('  URL after extra wait:', url2);
-      success = !url2.includes('accounts/login');
-    }
-
-    if (!success && page.url().includes('recaptcha')) {
-      console.log('  ⚠️ reCAPTCHA detected — attempting to solve...');
-      const solved = await solveRecaptcha(page);
-      if (solved) {
-        await page.waitForTimeout(8000);
-        const url3 = page.url();
-        console.log('  URL after captcha solve:', url3);
-        success = !url3.includes('accounts/login') && !url3.includes('recaptcha');
-        if (!success) {
-          await page.waitForTimeout(5000);
-          success = !page.url().includes('accounts/login') && !page.url().includes('recaptcha');
-        }
-      }
-    }
-
-    if (!success) {
-      // Check for checkpoint/challenge
-      const bodyText = await page.evaluate(() => document.body.innerText.substring(0, 500));
-      console.log('  Page text:', bodyText.replace(/\n/g, ' ').substring(0, 200));
-      console.log('  ❌ Login failed');
-      await context.close();
-      await browser.close();
-      return false;
-    }
-
-    // Dismiss popups
-    try { await page.locator('button:has-text("Not Now")').first().click({ timeout: 4000 }); await page.waitForTimeout(1000); } catch (e) {}
-    try { await page.locator('button:has-text("Save Info")').first().click({ timeout: 3000 }); await page.waitForTimeout(1000); } catch (e) {}
-
+    let ok = !page.url().includes('accounts/login');
+    if (!ok) { await page.waitForTimeout(8000); ok = !page.url().includes('accounts/login'); }
+    if (!ok && page.url().includes('recaptcha')) { const s=await solveRecaptcha(page); if(s) { await page.waitForTimeout(10000); ok=!page.url().includes('accounts/login')&&!page.url().includes('recaptcha'); } }
+    if (!ok) return false;
+    try { await page.locator('button:has-text("Not Now")').first().click({timeout:3000}); } catch(e) {}
     const cookies = await context.cookies();
-    fs.writeFileSync(STATE_FILE, JSON.stringify(cookies, null, 2));
+    fs.writeFileSync(STATE_FILE, JSON.stringify(cookies,null,2));
     loggedIn = true;
     console.log('✅ Instagram login successful!');
-
-    await context.close();
-    await browser.close();
+    await context.close(); await browser.close();
     return true;
-  } catch (err) {
-    console.error('❌ Login error:', err.message);
-    if (browser) await browser.close().catch(() => {});
-    return false;
-  }
+  } catch(err) { console.error('Login error:', err.message?.substring(0,80)); if(browser) await browser.close().catch(()=>{}); return false; }
 }
 
 // ─── Browser Factory ───────────────────────────
 async function createSession() {
-  const browser = await chromium.launch({
-    headless: true,
-    args: [
-      '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
-      '--disable-blink-features=AutomationControlled',
-      '--window-size=1920,1080',
-    ],
-  });
-
-  const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36',
-    viewport: { width: 1920, height: 1080 },
-    locale: 'en-US',
-    timezoneId: 'America/New_York',
-  });
-
-  // Bypass webdriver detection
-  await context.addInitScript(() => {
-    Object.defineProperty(navigator, 'webdriver', { get: () => false });
-    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-  });
-
-  if (fs.existsSync(STATE_FILE)) {
-    try {
-      const cookies = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-      await context.addCookies(cookies);
-    } catch (e) {}
-  }
-
+  const browser = await chromium.launch({ headless:true, args:['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-blink-features=AutomationControlled','--window-size=1920,1080'] });
+  const context = await browser.newContext({ userAgent:'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36', viewport:{width:1920,height:1080}, locale:'en-US', timezoneId:'America/New_York' });
+  await context.addInitScript(() => { Object.defineProperty(navigator,'webdriver',{get:()=>false}); Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3,4,5]}); Object.defineProperty(navigator,'languages',{get:()=>['en-US','en']}); });
+  if (fs.existsSync(STATE_FILE)) { try { const cookies=JSON.parse(fs.readFileSync(STATE_FILE,'utf8')); await context.addCookies(cookies); } catch(e) {} }
   return { browser, context };
 }
 
-// ─── IG Search ─────────────────────────────────
-async function searchInstagram(query, limit = 10) {
-  const maxRes = Math.min(limit, 30);
-  const results = [];
+let ocrWorker = null;
+async function initOcr() {
+  if (!ocrWorker) ocrWorker = await createWorker('eng');
+  return ocrWorker;
+}
 
-  await ensureLogin();
+// ─── Clean Media URL ──────────────────────────
+function cleanMediaUrl(url) {
+  if (!url) return '';
+  // Extract the base CDN URL without query params for images
+  if (url.includes('cdninstagram.com') && url.includes('?')) {
+    return url.split('?')[0];
+  }
+  return url;
+}
 
-  const { browser, context } = await createSession();
-  const page = await context.newPage();
-
-  callCounter++;
-  const isSingle = /^[\w]+$/.test(query);
-  const searchUrl = isSingle
-    ? `https://www.instagram.com/explore/tags/${encodeURIComponent(query)}/`
-    : `https://www.instagram.com/explore/search/keyword/?q=${encodeURIComponent(query)}`;
-
+// ─── Open Post to Get Clean Media + OCR ──────
+async function enrichPost(page, post) {
   try {
-    console.log(`🔍 IG: "${query}"`);
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
-    await page.waitForTimeout(5000);
+    await page.goto(post.link, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await page.waitForTimeout(3000);
 
-    // Click "Top" or "Posts" tab
-    try {
-      const tabs = page.locator('a[role="tab"], div[role="tab"], span:has-text("Top"), span:has-text("Posts")').first();
-      await tabs.click({ timeout: 4000 });
-      await page.waitForTimeout(3000);
-    } catch (e) {}
+    // Get clean image from the post page
+    const media = await page.evaluate(() => {
+      // Try to get the main image/video
+      const imgs = document.querySelectorAll('img[decoding="auto"], img[src*="cdninstagram"]');
+      for (const img of imgs) {
+        if (img.src && img.src.includes('cdninstagram') && img.width > 100) {
+          // Return clean URL without query params
+          return img.src.split('?')[0];
+        }
+      }
+      const videos = document.querySelectorAll('video');
+      for (const v of videos) {
+        if (v.src) return v.src;
+      }
+      return '';
+    });
 
-    // Scroll to load content
-    for (let i = 0; i < 8 && results.length < maxRes * 2; i++) {
-      await page.evaluate(() => window.scrollBy(0, 1200));
-      await page.waitForTimeout(2000);
+    if (media) post.image = cleanMediaUrl(media);
+
+    // Get caption text from the post
+    const caption = await page.evaluate(() => {
+      // Try different caption selectors
+      const el = document.querySelector('h1') ||
+                 document.querySelector('[data-e2e="caption"]') ||
+                 document.querySelector('article div span') ||
+                 document.querySelector('div._a9zr');
+      return el?.innerText?.substring(0, 500) || '';
+    });
+    if (caption) post.caption = caption;
+
+    // Try OCR on the image if we have one
+    if (post.image && post.image.length > 10) {
+      try {
+        await initOcr();
+        // Use the clean image URL
+        const { data } = await ocrWorker.recognize(post.image);
+        if (data.text?.trim()) {
+          post.ocr_text = data.text.trim().substring(0, 500);
+          post.ocr_confidence = Math.round(data.confidence || 0);
+        }
+      } catch (e) {
+        // OCR failed silently
+      }
     }
 
-    // Extract posts — Instagram uses <video> for thumbnails now
-    const posts = await page.evaluate((maxRes) => {
-      const items = [];
-      const seen = new Set();
+    return post;
+  } catch (e) {
+    return post; // Return as-is if enrich fails
+  }
+}
 
-      // Get from /p/ and /reel/ links
-      const links = document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]');
-      for (const link of links) {
-        if (items.length >= maxRes) break;
-        const href = link.getAttribute('href');
-        const isReel = href?.includes('/reel/');
-        const id = href ? href.split(isReel ? '/reel/' : '/p/')[1]?.split('/')[0] || '' : '';
-        if (!id || seen.has(id)) continue;
-        seen.add(id);
+// ─── Quote Tags with Rotation ─────────────────
+function getNextTag() {
+  const tag = QUOTE_TAGS[tagIndex % QUOTE_TAGS.length];
+  tagIndex++;
+  return tag;
+}
 
-        // Try video thumbnail
-        const video = link.querySelector('video');
-        let mediaUrl = '';
-        let caption = '';
-        if (video) {
-          mediaUrl = video.src || '';
+function getNextTags(count) {
+  const tags = [];
+  for (let i = 0; i < count; i++) {
+    tags.push(getNextTag());
+  }
+  return tags;
+}
+
+// ─── Fetch Viral Quotes ───────────────────────
+async function fetchViralQuotes(limit = 3) {
+  const maxRes = Math.min(limit, 10);
+  const results = [];
+
+  // Get 2-3 different hashtags to diversify results
+  const tags = getNextTags(Math.min(3, maxRes + 1));
+
+  try {
+    await ensureLogin();
+    const { browser, context } = await createSession();
+    const page = await context.newPage();
+
+    for (const tag of tags) {
+      if (results.length >= maxRes) break;
+      callCounter++;
+      console.log(`🔍 #${tag}`);
+
+      try {
+        await page.goto(`https://www.instagram.com/explore/tags/${tag}/`, { waitUntil: 'domcontentloaded', timeout: 20000 });
+        await page.waitForTimeout(4000);
+
+        // Scroll a bit to load posts
+        for (let s = 0; s < 6; s++) {
+          await page.evaluate(() => window.scrollBy(0, 800));
+          await page.waitForTimeout(1500);
         }
 
-        // Try img fallback
-        const img = link.querySelector('img');
-        if (!mediaUrl && img?.src) mediaUrl = img.src;
-        if (img?.alt) caption = img.alt.substring(0, 300);
+        // Collect fresh posts
+        const rawPosts = await page.evaluate(() => {
+          const items = [];
+          const links = document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]');
+          for (const link of links) {
+            const href = link.getAttribute('href');
+            const isReel = href?.includes('/reel/');
+            const id = href ? href.split(isReel ? '/reel/' : '/p/')[1]?.split('/')[0] || '' : '';
+            if (!id) continue;
 
-        items.push({
-          id, caption,
-          image: mediaUrl,
-          link: `https://www.instagram.com${href}`,
-          type: isReel ? 'reel' : 'image',
+            const video = link.querySelector('video');
+            const img = link.querySelector('img');
+            const thumb = video?.src || img?.src || '';
+
+            items.push({
+              id, type: isReel ? 'reel' : 'image',
+              image: cleanMediaUrl(thumb),
+              link: `https://www.instagram.com${href}`,
+            });
+          }
+          return items;
         });
-      }
 
-      return items;
-    }, maxRes * 2);
+        // Dedup and add
+        for (const p of rawPosts) {
+          if (results.length >= maxRes) break;
+          if (!isSeen(p.id)) {
+            markSeen(p.id);
+            results.push(p);
+          }
+        }
+      } catch (e) {
+        console.log(`  ⚠️ #${tag} error: ${e.message?.substring(0,60)}`);
+      }
+    }
 
     await context.close();
     await browser.close();
 
-    // Dedup
-    for (const r of posts) {
-      if (results.length >= maxRes) break;
-      const key = r.id || r.link || r.image;
-      if (key && !isSeen(key)) {
-        markSeen(key);
-        results.push(r);
+    // Enrich each post with clean media + OCR
+    if (results.length > 0) {
+      console.log(`📸 Enriching ${results.length} posts with media + OCR...`);
+      const { browser: b2, context: c2 } = await createSession();
+      const p2 = await c2.newPage();
+
+      for (let i = 0; i < results.length; i++) {
+        console.log(`  📍 ${i+1}/${results.length}: ${results[i].id}`);
+        results[i] = await enrichPost(p2, results[i]);
       }
+
+      await c2.close();
+      await b2.close();
     }
 
-    // If empty but have posts, return some anyway
-    if (results.length === 0 && posts.length > 0) {
-      for (const r of posts.slice(0, maxRes)) {
-        const key = r.id || r.link || r.image;
-        if (key) markSeen(key);
-        results.push(r);
-      }
-    }
-
+    console.log(`✅ ${results.length} viral quotes`);
     return results;
 
   } catch (err) {
-    console.error('  ⚠️ Search error:', err.message?.substring(0, 80));
-    await context.close().catch(() => {});
-    await browser.close().catch(() => {});
-    return results;
-  }
-}
-
-// ─── Explore ───────────────────────────────────
-async function exploreInstagram(limit = 10) {
-  const maxRes = Math.min(limit, 30);
-  const results = [];
-
-  await ensureLogin();
-
-  const { browser, context } = await createSession();
-  const page = await context.newPage();
-
-  try {
-    console.log('🌐 Loading IG Explore...');
-    await page.goto('https://www.instagram.com/explore/', { waitUntil: 'domcontentloaded', timeout: 25000 });
-    await page.waitForTimeout(5000);
-
-    for (let i = 0; i < 8; i++) {
-      await page.evaluate(() => window.scrollBy(0, 1200));
-      await page.waitForTimeout(1500);
-    }
-
-    const posts = await page.evaluate((maxRes) => {
-      const items = [];
-      const seen = new Set();
-      const links = document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]');
-      for (const link of links) {
-        if (items.length >= maxRes) break;
-        const href = link.getAttribute('href');
-        const isReel = href?.includes('/reel/');
-        const id = href ? href.split(isReel ? '/reel/' : '/p/')[1]?.split('/')[0] || '' : '';
-        if (!id || seen.has(id)) continue;
-        seen.add(id);
-
-        const video = link.querySelector('video');
-        const img = link.querySelector('img');
-        let mediaUrl = video?.src || '';
-        if (!mediaUrl && img?.src) mediaUrl = img.src;
-        const caption = img?.alt?.substring(0, 300) || '';
-
-        items.push({ id, caption, image: mediaUrl, link: `https://www.instagram.com${href}`, type: isReel ? 'reel' : 'image' });
-      }
-      return items;
-    }, maxRes * 2);
-
-    await context.close();
-    await browser.close();
-
-    for (const r of posts) {
-      if (results.length >= maxRes) break;
-      const key = r.id || r.link;
-      if (key && !isSeen(key)) { markSeen(key); results.push(r); }
-    }
-    if (results.length === 0 && posts.length > 0) {
-      for (const r of posts.slice(0, maxRes)) {
-        const key = r.id || r.link;
-        if (key) markSeen(key);
-        results.push(r);
-      }
-    }
-
-    return results;
-
-  } catch (err) {
-    console.error('  ⚠️ Explore error:', err.message?.substring(0, 60));
-    await context.close().catch(() => {});
-    await browser.close().catch(() => {});
-    return results;
-  }
-}
-
-// ─── Scrape ────────────────────────────────────
-async function scrapeInstagramPage(pageUrl, limit = 10) {
-  const maxRes = Math.min(limit, 30);
-  const results = [];
-
-  await ensureLogin();
-
-  const { browser, context } = await createSession();
-  const page = await context.newPage();
-
-  try {
-    await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
-    await page.waitForTimeout(5000);
-
-    for (let i = 0; i < 8; i++) {
-      await page.evaluate(() => window.scrollBy(0, 1200));
-      await page.waitForTimeout(1500);
-    }
-
-    const posts = await page.evaluate((maxRes) => {
-      const items = [];
-      const seen = new Set();
-      const selector = document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]');
-      for (const link of selector) {
-        if (items.length >= maxRes) break;
-        const href = link.getAttribute('href');
-        const isReel = href?.includes('/reel/');
-        const id = href ? href.split(isReel ? '/reel/' : '/p/')[1]?.split('/')[0] || '' : '';
-        if (!id || seen.has(id)) continue;
-        seen.add(id);
-
-        const video = link.querySelector('video');
-        const img = link.querySelector('img');
-        let mediaUrl = video?.src || '';
-        if (!mediaUrl && img?.src) mediaUrl = img.src;
-        const caption = img?.alt?.substring(0, 300) || '';
-
-        items.push({ id, caption, image: mediaUrl, link: `https://www.instagram.com${href}`, type: isReel ? 'reel' : 'image' });
-      }
-      return items;
-    }, maxRes * 2);
-
-    await context.close();
-    await browser.close();
-
-    for (const r of posts) {
-      if (results.length >= maxRes) break;
-      const key = r.id || r.link;
-      if (key && !isSeen(key)) { markSeen(key); results.push(r); }
-    }
-    if (results.length === 0 && posts.length > 0) {
-      for (const r of posts.slice(0, maxRes)) {
-        const key = r.id || r.link;
-        if (key) markSeen(key);
-        results.push(r);
-      }
-    }
-
-    return results;
-
-  } catch (err) {
-    console.error('  ⚠️ Scrape error:', err.message?.substring(0, 60));
-    await context.close().catch(() => {});
-    await browser.close().catch(() => {});
+    console.error('Viral quotes error:', err.message?.substring(0,80));
     return results;
   }
 }
 
 // ─── Routes ────────────────────────────────────
 
-app.get('/api/instagram/search', async (req, res) => {
+// ★ MAIN ENDPOINT: Get viral quotes with OCR text
+app.get('/api/instagram/viral-quotes', async (req, res) => {
   try {
-    const query = req.query.q || req.query.query || req.query.search;
-    const count = parseInt(req.query.count || '5', 10);
-    const scrapeUrl = req.query.scrape || req.query.scrapeUrl || req.query.page;
-    const shouldExplore = req.query.exp === 'true';
-
-    // Scrape mode
-    if (scrapeUrl) {
-      if (!await ensureLogin()) {
-        return res.json({ success: false, error: 'Not logged in', note: 'Set IG_USERNAME & IG_PASSWORD in env vars' });
-      }
-      const scraped = await scrapeInstagramPage(scrapeUrl, count);
-      return res.json({ success: true, source: 'scrape', scrapeUrl, count: scraped.length, data: scraped });
-    }
-
-    if (!query) return res.status(400).json({ success: false, error: 'Missing ?q' });
-
+    const count = parseInt(req.query.count || '3', 10);
     if (!await ensureLogin()) {
-      return res.json({ success: false, error: 'Not logged in', note: 'Set IG_USERNAME & IG_PASSWORD in env vars' });
+      return res.json({ success: false, error: 'Not logged in' });
     }
-
-    const content = await searchInstagram(query, count);
-    let exp = [];
-    if (shouldExplore) exp = await exploreInstagram(count);
-
-    res.json({ success: true, query, count: content.length, data: content, explore: shouldExplore ? { count: exp.length, data: exp } : undefined });
+    const quotes = await fetchViralQuotes(count);
+    res.json({ success: true, count: quotes.length, data: quotes });
   } catch (err) {
-    console.error('Search error:', err.message);
     res.json({ success: false, error: err.message, data: [] });
   }
+});
+
+// Legacy endpoints (keep for backwards compat)
+app.get('/api/instagram/search', async (req, res) => {
+  try {
+    const query = req.query.q || req.query.query;
+    const count = parseInt(req.query.count || '5', 10);
+    if (!await ensureLogin()) return res.json({ success: false, error: 'Not logged in' });
+    if (!query) return res.status(400).json({ success: false, error: 'Missing ?q' });
+
+    const { browser, context } = await createSession();
+    const page = await context.newPage();
+    callCounter++;
+    const isSingle = /^[\w]+$/.test(query);
+    const searchUrl = isSingle ? `https://www.instagram.com/explore/tags/${encodeURIComponent(query)}/` : `https://www.instagram.com/explore/search/keyword/?q=${encodeURIComponent(query)}`;
+    await page.goto(searchUrl, { waitUntil:'domcontentloaded', timeout:25000 });
+    await page.waitForTimeout(5000);
+    for (let s=0; s<8; s++) { await page.evaluate(()=>window.scrollBy(0,1200)); await page.waitForTimeout(1500); }
+    const posts = await page.evaluate((maxRes) => {
+      const items=[], seen=new Set();
+      const links=document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]');
+      for (const link of links) {
+        if (items.length>=maxRes) break;
+        const href=link.getAttribute('href');
+        const isReel=href?.includes('/reel/');
+        const id=href?href.split(isReel?'/reel/':'/p/')[1]?.split('/')[0]||'':'';
+        if (!id||seen.has(id)) continue; seen.add(id);
+        const video=link.querySelector('video'); const img=link.querySelector('img');
+        items.push({id, caption:img?.alt?.substring(0,300)||'', image:video?.src?.split('?')[0]||img?.src?.split('?')[0]||'', link:`https://www.instagram.com${href}`, type:isReel?'reel':'image' });
+      }
+      return items;
+    }, count*2);
+    await context.close(); await browser.close();
+    const results=[];
+    for (const r of posts) { if (results.length>=count) break; const k=r.id||r.link; if(k&&!isSeen(k)){markSeen(k);results.push(r);} }
+    res.json({ success:true, query, count:results.length, data:results });
+  } catch(err) { res.json({ success:false, error:err.message, data:[] }); }
 });
 
 app.get('/api/instagram/explore', async (req, res) => {
   try {
-    if (!await ensureLogin()) {
-      return res.json({ success: false, error: 'Not logged in', note: 'Set IG_USERNAME & IG_PASSWORD in env vars' });
-    }
-    const content = await exploreInstagram(parseInt(req.query.count || '10', 10));
-    res.json({ success: true, count: content.length, data: content });
-  } catch (err) {
-    res.json({ success: false, error: err.message, data: [] });
-  }
+    const count = parseInt(req.query.count||'10',10);
+    if (!await ensureLogin()) return res.json({ success: false, error: 'Not logged in' });
+    const { browser, context } = await createSession();
+    const page = await context.newPage();
+    await page.goto('https://www.instagram.com/explore/', { waitUntil:'domcontentloaded', timeout:25000 });
+    await page.waitForTimeout(5000);
+    for (let s=0; s<8; s++) { await page.evaluate(()=>window.scrollBy(0,1200)); await page.waitForTimeout(1500); }
+    const posts = await page.evaluate((maxRes) => {
+      const items=[], seen=new Set(); const links=document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]');
+      for (const link of links) { if(items.length>=maxRes)break; const href=link.getAttribute('href'); const isReel=href?.includes('/reel/'); const id=href?href.split(isReel?'/reel/':'/p/')[1]?.split('/')[0]||'':''; if(!id||seen.has(id))continue; seen.add(id); const video=link.querySelector('video'); const img=link.querySelector('img'); items.push({id, caption:img?.alt?.substring(0,300)||'', image:video?.src?.split('?')[0]||img?.src?.split('?')[0]||'', link:`https://www.instagram.com${href}`, type:isReel?'reel':'image'}); }
+      return items;
+    }, count*2);
+    await context.close(); await browser.close();
+    const results=[];
+    for (const r of posts) { if(results.length>=count)break; const k=r.id||r.link; if(k&&!isSeen(k)){markSeen(k);results.push(r);} }
+    res.json({ success:true, count:results.length, data:results });
+  } catch(err) { res.json({ success:false, error:err.message, data:[] }); }
 });
 
 app.get('/api/instagram/scrape', async (req, res) => {
   try {
-    if (!await ensureLogin()) {
-      return res.json({ success: false, error: 'Not logged in', note: 'Set IG_USERNAME & IG_PASSWORD in env vars' });
-    }
-    const url = req.query.url || req.query.pageUrl || req.query.scrape;
-    if (!url) return res.status(400).json({ success: false, error: 'Missing ?url' });
-    const content = await scrapeInstagramPage(url, parseInt(req.query.count || '10', 10));
-    res.json({ success: true, scrapeUrl: url, count: content.length, data: content });
-  } catch (err) {
-    res.json({ success: false, error: err.message, data: [] });
-  }
-});
-
-app.all('/api/instagram/follow', (req, res) => {
-  res.json({ success: true, followed: 0, accounts: [], note: 'Follow requires Instagram login' });
+    const url = req.query.url||req.query.pageUrl||req.query.scrape;
+    const count = parseInt(req.query.count||'10',10);
+    if (!url) return res.status(400).json({ success:false, error:'Missing ?url' });
+    if (!await ensureLogin()) return res.json({ success: false, error: 'Not logged in' });
+    const { browser, context } = await createSession();
+    const page = await context.newPage();
+    await page.goto(url, { waitUntil:'domcontentloaded', timeout:25000 });
+    await page.waitForTimeout(5000);
+    for (let s=0; s<8; s++) { await page.evaluate(()=>window.scrollBy(0,1200)); await page.waitForTimeout(1500); }
+    const posts = await page.evaluate((maxRes) => {
+      const items=[], seen=new Set(); const links=document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]');
+      for (const link of links) { if(items.length>=maxRes)break; const href=link.getAttribute('href'); const isReel=href?.includes('/reel/'); const id=href?href.split(isReel?'/reel/':'/p/')[1]?.split('/')[0]||'':''; if(!id||seen.has(id))continue; seen.add(id); const video=link.querySelector('video'); const img=link.querySelector('img'); items.push({id, caption:img?.alt?.substring(0,300)||'', image:video?.src?.split('?')[0]||img?.src?.split('?')[0]||'', link:`https://www.instagram.com${href}`, type:isReel?'reel':'image'}); }
+      return items;
+    }, count*2);
+    await context.close(); await browser.close();
+    const results=[];
+    for (const r of posts) { if(results.length>=count)break; const k=r.id||r.link; if(k&&!isSeen(k)){markSeen(k);results.push(r);} }
+    res.json({ success:true, scrapeUrl:url, count:results.length, data:results });
+  } catch(err) { res.json({ success:false, error:err.message, data:[] }); }
 });
 
 app.get('/api/instagram/login', async (req, res) => {
   loggedIn = false;
   const result = await loginToInstagram();
-  res.json({ success: result, loggedIn });
+  res.json({ success:result, loggedIn });
 });
 
 app.get('/api/instagram/download', async (req, res) => {
   try {
     const mediaUrl = req.query.url;
-    if (!mediaUrl) return res.status(400).json({ success: false, error: 'Missing ?url=' });
-    https.get(mediaUrl, {
-      headers: { 'User-Agent': UA, 'Referer': 'https://www.instagram.com/' },
-    }, (response) => {
-      if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location)
-        return res.redirect(response.headers.location);
-      if (response.statusCode !== 200) return res.status(500).json({ success: false, error: 'Download failed' });
-      res.setHeader('Content-Type', response.headers['content-type'] || 'image/jpeg');
+    if (!mediaUrl) return res.status(400).json({ success:false, error:'Missing ?url=' });
+    https.get(mediaUrl, { headers:{'User-Agent':UA,'Referer':'https://www.instagram.com/'} }, (response) => {
+      if (response.statusCode>=300&&response.statusCode<400&&response.headers.location) return res.redirect(response.headers.location);
+      if (response.statusCode!==200) return res.status(500).json({ success:false, error:'Download failed' });
+      res.setHeader('Content-Type', response.headers['content-type']||'image/jpeg');
       response.pipe(res);
-    }).on('error', () => res.status(500).json({ success: false, error: 'Download failed' }));
-  } catch { res.status(500).json({ success: false, error: 'Download failed' }); }
+    }).on('error', () => res.status(500).json({ success:false, error:'Download failed' }));
+  } catch { res.status(500).json({ success:false, error:'Download failed' }); }
 });
 
-// ─── Session Export/Import ────────────────────
 app.get('/api/instagram/session/export', (req, res) => {
-  try {
-    const data = fs.readFileSync(STATE_FILE, 'utf8');
-    res.json({ success: true, session: JSON.parse(data) });
-  } catch {
-    res.json({ success: false, error: 'No session file', note: 'Login first or upload a session' });
-  }
+  try { const data = fs.readFileSync(STATE_FILE,'utf8'); res.json({ success:true, session:JSON.parse(data) }); }
+  catch { res.json({ success:false, error:'No session file' }); }
 });
 
 app.post('/api/instagram/session/import', async (req, res) => {
   try {
     const session = req.body?.session;
-    if (!session || !Array.isArray(session)) return res.status(400).json({ success: false, error: 'Missing "session" array' });
-    fs.writeFileSync(STATE_FILE, JSON.stringify(session, null, 2));
+    if (!session||!Array.isArray(session)) return res.status(400).json({ success:false, error:'Missing "session" array' });
+    fs.writeFileSync(STATE_FILE, JSON.stringify(session,null,2));
     loggedIn = true;
-    console.log('✅ Session imported from local machine');
-    res.json({ success: true, note: 'Session imported! Try search now.' });
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
-  }
+    res.json({ success:true, note:'Session imported!' });
+  } catch(e) { res.status(500).json({ success:false, error:e.message }); }
 });
 
-let ocrWorker = null;
 app.post('/api/instagram/ocr', async (req, res) => {
   try {
-    const mediaUrl = req.body?.url;
-    if (!mediaUrl) return res.status(400).json({ success: false, error: 'Missing "url"' });
-    if (!ocrWorker) ocrWorker = await createWorker('eng');
-    const { data } = await ocrWorker.recognize(mediaUrl);
-    res.json({ success: true, text: data.text?.trim() || '', confidence: data.confidence || 0 });
-  } catch { res.status(500).json({ success: false, error: 'OCR failed' }); }
+    const url = req.body?.url;
+    if (!url) return res.status(400).json({ success:false, error:'Missing "url"' });
+    await initOcr();
+    const { data } = await ocrWorker.recognize(url);
+    res.json({ success:true, text:data.text?.trim()||'', confidence:data.confidence||0 });
+  } catch { res.status(500).json({ success:false, error:'OCR failed' }); }
 });
 
 app.get('/', (req, res) => {
   res.json({
-    status: 'alive',
-    name: 'Instagram Marketing API',
-    version: '2.0.0',
-    loggedIn,
-    realInstagramOnly: true,
-    seenPostsCache: seenIds.size,
-    setup: loggedIn ? '✅ Instagram logged in' : '⚠️  Set IG_USERNAME & IG_PASSWORD in env vars',
-    note: '100% real Instagram content only. Returns empty if not logged in.',
-    endpoints: {
-      search: 'GET /api/instagram/search?q=KEYWORD&count=5',
-      scrape: 'GET /api/instagram/scrape?url=URL&count=10',
-      explore: 'GET /api/instagram/explore?count=10',
-      download: 'GET /api/instagram/download?url=URL',
-      ocr: 'POST /api/instagram/ocr {"url":"URL"}',
-    },
-    examples: {
-      search: 'GET /api/instagram/search?q=quotes&count=5',
-      scrape_profile: 'GET /api/instagram/scrape?url=https://www.instagram.com/nike/&count=10',
-      explore: 'GET /api/instagram/explore?count=10',
+    status:'alive', name:'Instagram API v2.0', version:'2.0.0', loggedIn,
+    realInstagramOnly:true, seenPostsCache:seenIds.size,
+    setup:loggedIn?'✅ Instagram logged in':'⚠️ Login required',
+    quoteTagsRotation: QUOTE_TAGS.length,
+    endpoints:{
+      viralQuotes:'GET /api/instagram/viral-quotes?count=3 (★ RECOMMENDED - auto OCR)',
+      search:'GET /api/instagram/search?q=KEYWORD&count=5',
+      explore:'GET /api/instagram/explore?count=10',
+      scrape:'GET /api/instagram/scrape?url=URL&count=10',
+      download:'GET /api/instagram/download?url=URL',
+      ocr:'POST /api/instagram/ocr {"url":"URL"}',
+      sessionImport:'POST /api/instagram/session/import {"session":[...]}',
+      sessionExport:'GET /api/instagram/session/export',
     },
   });
 });
 
 // ─── Start ─────────────────────────────────────
-app.listen(PORT, async () => {
+app.listen(PORT, () => {
   console.log(`\n╔══════════════════════════════════════╗`);
-  console.log(`║   Instagram Marketing API v2.0      ║`);
-  console.log(`║   ✓ 100% real Instagram content      ║`);
-  console.log(`║   ✓ No fallbacks, no fakes           ║`);
-  console.log(`║   Port: ${PORT}                            ║`);
+  console.log(`║  Instagram Marketing API v2.0       ║`);
+  console.log(`║  ★ Viral Quotes + Auto OCR          ║`);
+  console.log(`║  Port: ${PORT}                              ║`);
   console.log(`╚══════════════════════════════════════╝\n`);
 
   if (IG_USERNAME && IG_PASSWORD) {
-    // Try login in background — ensureLogin() will retry on first API request
     loginToInstagram().then(r => {
       if (r) console.log('✅ Initial login successful');
       else console.log('⚠️ Initial login failed — will retry on first API request');
