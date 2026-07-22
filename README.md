@@ -251,6 +251,79 @@ Body: { "url": "https://...image_url..." }
 
 ---
 
+### 8. Scrape Any Instagram Page (Profile, Hashtag, etc.)
+
+Scrape ALL content from any Instagram page — a profile, a hashtag feed, a specific account's reels.
+
+**Two equivalent ways:**
+
+```
+# Via the search endpoint with ?scrape=
+GET /api/instagram/search?scrape=https://www.instagram.com/nike/&media=posts&count=10
+
+# Via the dedicated scrape endpoint
+GET /api/instagram/scrape?url=https://www.instagram.com/nike/&media=reels&count=5&viral=true
+```
+
+| Parameter | Type | Description | Default |
+|-----------|------|-------------|---------|
+| `scrape` / `url` | string | **Required** — full Instagram page URL | — |
+| `media` | string | `posts` or `reels` | `posts` |
+| `count` | number | Results to return (1-30) | `5` |
+| `viral` | string | `true` to rank by highest engagement | — |
+
+**Example — scrape all posts from a big account:**
+
+```
+GET /api/instagram/search?scrape=https://www.instagram.com/nike/&media=posts&count=10
+```
+
+**Example — scrape reels with viral ranking:**
+
+```
+GET /api/instagram/search?scrape=https://www.instagram.com/nike/&media=reels&count=5&viral=true
+```
+
+When `viral=true` it:
+1. Scrolls deeper to collect more content
+2. Opens each post to get likes/views
+3. Returns results sorted by engagement (highest first)
+
+**Response:**
+```json
+{
+  "success": true,
+  "source": "scrape",
+  "scrapeUrl": "https://www.instagram.com/nike/",
+  "media": "posts",
+  "count": 10,
+  "data": [
+    {
+      "id": "DHxYkZ...",
+      "caption": "Just do it...",
+      "image": "https://...cdninstagram.com/...",
+      "link": "https://www.instagram.com/p/DHxYkZ...",
+      "type": "post",
+      "likes": "89,201 likes",
+      "views": "",
+      "mediaUrl": "https://...cdninstagram.com/...",
+      "owner": "",
+      "engagement": 89201
+    }
+  ]
+}
+```
+
+**Use cases:**
+- **Competitor research** — scrape a competitor's profile, see which posts get the most engagement
+- **Influencer analysis** — scrape an influencer's page, find their best-performing content
+- **Hashtag research** — scrape `https://www.instagram.com/explore/tags/motivation/`
+- **Trend spotting** — scrape a niche account daily, track which posts are outperforming
+- **Content curation** — scrape accounts in your niche and use the content for inspiration
+- **Viral sorting** — `viral=true` finds the hidden gems (posts with highest engagement)<｜end▁of▁thinking｜>
+
+---
+
 ## ⚠️ Important Notes
 
 ### Rate Limiting
@@ -307,10 +380,11 @@ Then visit: `http://localhost:3000/`
 
 ---
 
-## 📊 Sample n8n Workflow
+## 📊 Sample n8n Workflows
 
+### Workflow 1: Daily Quote Content Pipeline
 ```
-1. Manual Trigger
+1. Schedule (daily 8am)
 2. HTTP Request → GET /api/instagram/search?q=quotes&media=all&count=3&follow=true
 3. Extract "data" items
 4. Loop over items:
@@ -318,6 +392,34 @@ Then visit: `http://localhost:3000/`
    6. Save text + link to Google Sheets / Notion / file
 ```
 
----
+### Workflow 2: Competitor Research (Scrape)
+```
+1. Manual Trigger
+2. HTTP Request → GET /api/instagram/scrape?url=https://www.instagram.com/COMPETITOR_USERNAME/&media=posts&count=20&viral=true
+3. Items are already sorted by engagement (highest first)
+4. Loop over top 5:
+   5. Extract caption, likes, mediaUrl, link
+   6. Save to Google Sheets: caption | likes | link | mediaUrl
+```
+
+### Workflow 3: Viral Reels Hunter
+```
+1. Schedule (every 6 hours)
+2. HTTP Request → GET /api/instagram/scrape?url=https://www.instagram.com/BIG_ACCOUNT_IN_NICHE/&media=reels&count=10&viral=true
+3. Filter items with engagement > 10,000
+4. Send to Telegram / Slack: "🔥 Viral reel: {{caption}} ({{likes}})"
+5. Save to database for trend tracking
+```
+
+### Workflow 4: Full Niche Training + Scrape + Explore
+```
+1. Schedule (daily)
+2. HTTP Request → GET /api/instagram/search?q=YOUR_NICHE&media=all&count=3&follow=true&exp=true
+   → Follows niche accounts, gets explore content
+3. For each followed account:
+   4. HTTP Request → GET /api/instagram/scrape?url=https://www.instagram.com/{{username}}/&media=posts&count=5&viral=true
+   5. Save best content from each account
+6. Send daily summary: "🎯 Followed X accounts | Collected Y viral posts"
+```
 
 Built for marketers, content creators, and n8n power users.

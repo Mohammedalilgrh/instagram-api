@@ -392,6 +392,106 @@ async function followRelatedAccounts(query, maxFollow = 5) {
 }
 
 // ──────────────────────────────────────────────
+// Scrape any Instagram page
+// ──────────────────────────────────────────────
+
+async function scrapeInstagramPage(pageUrl, mediaType = 'posts', limit = 10, viralOnly = false) {
+  const maxResults = Math.min(limit, 30);
+  const results = [];
+  const isReels = mediaType === 'reels';
+
+  const { browser, context } = await createSession(isReels);
+  const page = await context.newPage();
+
+  try {
+    console.log(`📄 Scraping page: ${pageUrl} (${isReels ? 'reels' : 'posts'}, viral=${viralOnly})`);
+
+    // If reels mode and URL is a profile page, switch to reels tab
+    let targetUrl = pageUrl;
+    if (isReels && pageUrl.match(/instagram\.com\/[^/]+\/?$/) && !pageUrl.includes('/reels/')) {
+      const clean = pageUrl.replace(/\/+$/, '');
+      targetUrl = `${clean}/reels/`;
+    }
+
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
+    await page.waitForTimeout(4000);
+
+    // Scroll more for viral mode (collect bigger pool)
+    const scrollCount = viralOnly ? 10 : 5;
+    for (let i = 0; i < scrollCount && results.length < maxResults * (viralOnly ? 3 : 1); i++) {
+      await page.evaluate(() => window.scrollBy(0, 1000));
+      await page.waitForTimeout(2000);
+    }
+
+    // Extract posts or reels
+    const items = await page.evaluate((maxRes, isRels) => {
+      const extracted = [];
+      const selector = isRels ? 'a[href*="/reel/"]' : 'a[href*="/p/"]';
+      const links = document.querySelectorAll(selector);
+
+      for (const link of links) {
+        if (extracted.length >= maxRes) break;
+        const href = link.getAttribute('href');
+        const img = link.querySelector('img');
+        const video = link.querySelector('video');
+        const fullUrl = href ? `https://www.instagram.com${href}` : '';
+        extracted.push({
+          id: href ? href.split(isRels ? '/reel/' : '/p/')[1]?.split('/')[0] || '' : '',
+          caption: img?.alt?.substring(0, 300) || '',
+          image: img?.src || '',
+          videoUrl: video?.src || '',
+          link: fullUrl,
+          type: isRels ? 'reel' : 'post',
+        });
+      }
+      return extracted;
+    }, maxResults * (viralOnly ? 3 : 1), isReels);
+
+    results.push(...items);
+
+    // If viral mode, rank by engagement
+    if (viralOnly && results.length > 0) {
+      console.log(`  📊 Ranking ${results.length} posts by engagement...`);
+
+      // Get details (likes/views) for all collected items
+      for (let i = 0; i < results.length; i++) {
+        try {
+          const details = await getPostDetails(results[i].link);
+          results[i] = { ...results[i], ...details };
+          // Extract numeric likes
+          const likesText = results[i].likes || '0';
+          const viewsText = results[i].views || '0';
+          const likesNum = parseInt(likesText.replace(/[^0-9]/g, '')) || 0;
+          const viewsNum = parseInt(viewsText.replace(/[^0-9]/g, '')) || 0;
+          results[i].engagement = Math.max(likesNum, viewsNum);
+        } catch (e) {
+          results[i].engagement = 0;
+        }
+        await new Promise(r => setTimeout(r, 1000));
+      }
+
+      // Sort by engagement descending
+      results.sort((a, b) => (b.engagement || 0) - (a.engagement || 0));
+      console.log(`  ✅ Top viral post has ${results[0]?.engagement || 0} engagement`);
+    }
+
+    await context.close();
+    await browser.close();
+
+    // Slice to final limit
+    const final = results.slice(0, maxResults);
+    console.log(`✅ Scraped ${final.length} items from ${pageUrl}`);
+    return final;
+
+  } catch (err) {
+    console.error('Scrape error:', err.message);
+    await context.close().catch(() => {});
+    await browser.close().catch(() => {});
+    return results.slice(0, maxResults);
+  }
+}
+
+// ──────────────────────────────────────────────
 // Get post details (likes, views, caption)
 // ──────────────────────────────────────────────
 
@@ -452,23 +552,43 @@ async function getPostDetails(postUrl) {
 
 // ── Search Endpoint ──
 // GET /api/instagram/search?q=quotes&media=image&count=5&follow=false&exp=false
+// GET /api/instagram/search?scrape=https://www.instagram.com/username/&media=reels&count=5&viral=true
 //
 // Parameters:
-//   q       - Search keyword (required)
+//   q       - Search keyword (required unless scrape is used)
+//   scrape  - Full Instagram page URL to scrape all content from
 //   media   - "image" (default), "reels", or "all"
 //   count   - Number of results (1-30)
 //   follow  - "true" to follow relevant accounts
 //   exp     - "true" to also fetch explore page content
+//   viral   - "true" to get most viral/highest-engagement content
 
 app.get('/api/instagram/search', async (req, res) => {
   try {
+    const scrapeUrl = req.query.scrape || req.query.scrapeUrl || req.query.page;
     const query = req.query.q || req.query.query || req.query.search;
-    if (!query) return res.status(400).json({ success: false, error: 'Missing ?q parameter' });
-
     const media = req.query.media || 'image';
     const count = parseInt(req.query.count || '5', 10);
     const shouldFollow = req.query.follow === 'true';
     const shouldExplore = req.query.exp === 'true';
+    const viralOnly = req.query.viral === 'true';
+
+    // ── SCRAPE MODE ──
+    if (scrapeUrl) {
+      console.log(`\n📄 IG SCRAPE: ${scrapeUrl} (media: ${media}, count: ${count}, viral: ${viralOnly})`);
+      const scraped = await scrapeInstagramPage(scrapeUrl, media, count, viralOnly);
+      return res.json({
+        success: true,
+        source: 'scrape',
+        scrapeUrl,
+        media,
+        count: scraped.length,
+        data: scraped,
+      });
+    }
+
+    // ── SEARCH MODE ──
+    if (!query) return res.status(400).json({ success: false, error: 'Missing ?q parameter (or use ?scrape=URL)' });
 
     console.log(`\n🔍 IG SEARCH: "${query}" (media: ${media}, count: ${count})`);
 
@@ -487,7 +607,6 @@ app.get('/api/instagram/search', async (req, res) => {
         mediaUrl: details.mediaUrl || item.videoUrl || item.image || item.thumbnail,
         owner: details.owner,
       });
-      // Small delay to avoid rate limiting
       await new Promise(r => setTimeout(r, 1000));
     }
 
@@ -501,7 +620,6 @@ app.get('/api/instagram/search', async (req, res) => {
     let exploreContent = [];
     if (shouldExplore) {
       exploreContent = await exploreInstagram(count);
-      // Get details for explore items
       for (let i = 0; i < exploreContent.length; i++) {
         const details = await getPostDetails(exploreContent[i].link);
         exploreContent[i] = { ...exploreContent[i], ...details };
@@ -521,7 +639,36 @@ app.get('/api/instagram/search', async (req, res) => {
 
   } catch (err) {
     console.error('Search endpoint error:', err.message);
-    res.json({ success: true, query: req.query.q || '', count: 0, data: [] });
+    res.json({ success: true, count: 0, data: [] });
+  }
+});
+
+// ── Scrape Endpoint (standalone) ──
+// GET /api/instagram/scrape?url=PROFILE_URL&media=posts|reels&count=10&viral=true
+
+app.get('/api/instagram/scrape', async (req, res) => {
+  try {
+    const pageUrl = req.query.url || req.query.pageUrl || req.query.scrape;
+    if (!pageUrl) return res.status(400).json({ success: false, error: 'Missing ?url=' });
+
+    const media = req.query.media || 'posts';
+    const count = parseInt(req.query.count || '10', 10);
+    const viralOnly = req.query.viral === 'true';
+
+    console.log(`\n📄 IG SCRAPE (standalone): ${pageUrl}`);
+    const scraped = await scrapeInstagramPage(pageUrl, media, count, viralOnly);
+
+    res.json({
+      success: true,
+      scrapeUrl: pageUrl,
+      media,
+      count: scraped.length,
+      viral: viralOnly,
+      data: scraped,
+    });
+  } catch (err) {
+    console.error('Scrape endpoint error:', err.message);
+    res.json({ success: true, count: 0, data: [] });
   }
 });
 
@@ -620,6 +767,8 @@ app.get('/', (req, res) => {
       : '⚠️  Set IG_USERNAME & IG_PASSWORD in env vars',
     endpoints: {
       search: 'GET /api/instagram/search?q=KEYWORD&media=image|reels|all&count=5&follow=true&exp=true',
+      scrape: 'GET /api/instagram/search?scrape=PROFILE_URL&media=posts|reels&count=10&viral=true',
+      scrape_standalone: 'GET /api/instagram/scrape?url=PROFILE_URL&media=posts&count=10&viral=true',
       explore: 'GET /api/instagram/explore?count=10',
       follow: 'GET /api/instagram/follow?q=KEYWORD&count=5',
       download: 'GET /api/instagram/download?url=MEDIA_URL',
@@ -629,6 +778,8 @@ app.get('/', (req, res) => {
       search_image: 'GET /api/instagram/search?q=quotes&media=image&count=5',
       search_reels: 'GET /api/instagram/search?q=quotes&media=reels&count=5',
       search_full: 'GET /api/instagram/search?q=quotes&media=all&count=5&follow=true&exp=true',
+      scrape_profile: 'GET /api/instagram/search?scrape=https://www.instagram.com/nike/&media=posts&count=10',
+      scrape_reels: 'GET /api/instagram/search?scrape=https://www.instagram.com/nike/&media=reels&count=5&viral=true',
       explore: 'GET /api/instagram/explore?count=10',
     },
   });
