@@ -74,9 +74,9 @@ async function loginToInstagram() {
       await page.waitForTimeout(1500);
     } catch (e) {}
 
-    // Fill username
+    // Fill username / email
     try {
-      const usernameInput = page.locator('input[name="username"], input[autocomplete="username"]').first();
+      const usernameInput = page.locator('input[name="email"]').first();
       await usernameInput.waitFor({ timeout: 15000 });
       await usernameInput.fill(IG_USERNAME);
       await page.waitForTimeout(500);
@@ -89,7 +89,8 @@ async function loginToInstagram() {
 
     // Fill password
     try {
-      const passwordInput = page.locator('input[name="password"], input[autocomplete="current-password"]').first();
+      const passwordInput = page.locator('input[name="pass"]').first();
+      await passwordInput.waitFor({ timeout: 15000 });
       await passwordInput.fill(IG_PASSWORD);
       await page.waitForTimeout(500);
     } catch (e) {
@@ -99,13 +100,8 @@ async function loginToInstagram() {
       return false;
     }
 
-    // Click login
-    try {
-      const loginBtn = page.locator('button[type="submit"]').first();
-      await loginBtn.click();
-    } catch (e) {
-      await page.keyboard.press('Enter');
-    }
+    // Click login (input is invisible, use keyboard)
+    await page.keyboard.press('Enter');
     await page.waitForTimeout(8000);
 
     // Check if logged in
@@ -179,7 +175,10 @@ async function searchInstagram(query, limit = 10) {
   const page = await context.newPage();
 
   callCounter++;
-  const searchUrl = `https://www.instagram.com/search?q=${encodeURIComponent(query)}`;
+  const isSingle = /^[\w]+$/.test(query);
+  const searchUrl = isSingle
+    ? `https://www.instagram.com/explore/tags/${encodeURIComponent(query)}/`
+    : `https://www.instagram.com/explore/search/keyword/?q=${encodeURIComponent(query)}`;
 
   try {
     console.log(`🔍 IG: "${query}"`);
@@ -208,50 +207,40 @@ async function searchInstagram(query, limit = 10) {
       await page.waitForTimeout(2000);
     }
 
-    // Extract posts
+    // Extract posts — Instagram uses <video> for thumbnails now
     const posts = await page.evaluate((maxRes) => {
       const items = [];
       const seen = new Set();
 
-      // Get from /p/ links
-      const links = document.querySelectorAll('a[href*="/p/"]');
+      // Get from /p/ and /reel/ links
+      const links = document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]');
       for (const link of links) {
         if (items.length >= maxRes) break;
         const href = link.getAttribute('href');
-        const img = link.querySelector('img');
-        const id = href ? href.split('/p/')[1]?.split('/')[0] || '' : '';
-        if (id && !seen.has(id)) {
-          seen.add(id);
-          items.push({
-            id,
-            caption: img?.alt?.substring(0, 300) || '',
-            image: img?.src || '',
-            link: `https://www.instagram.com${href}`,
-            type: 'image',
-          });
-        }
-      }
+        const isReel = href?.includes('/reel/');
+        const id = href ? href.split(isReel ? '/reel/' : '/p/')[1]?.split('/')[0] || '' : '';
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
 
-      // Also try article tags
-      const articles = document.querySelectorAll('article');
-      for (const article of articles) {
-        if (items.length >= maxRes) break;
-        const imgs = article.querySelectorAll('img');
-        for (const img of imgs) {
-          if (items.length >= maxRes) break;
-          const src = img.src || '';
-          const alt = img.alt || '';
-          if (src && src.length > 50 && src.includes('cdninstagram') && !seen.has(src)) {
-            seen.add(src);
-            items.push({
-              id: `img-${Date.now()}-${items.length}`,
-              caption: alt.substring(0, 300),
-              image: src,
-              link: '',
-              type: 'image',
-            });
-          }
+        // Try video thumbnail
+        const video = link.querySelector('video');
+        let mediaUrl = '';
+        let caption = '';
+        if (video) {
+          mediaUrl = video.src || '';
         }
+
+        // Try img fallback
+        const img = link.querySelector('img');
+        if (!mediaUrl && img?.src) mediaUrl = img.src;
+        if (img?.alt) caption = img.alt.substring(0, 300);
+
+        items.push({
+          id, caption,
+          image: mediaUrl,
+          link: `https://www.instagram.com${href}`,
+          type: isReel ? 'reel' : 'image',
+        });
       }
 
       return items;
@@ -320,22 +309,22 @@ async function exploreInstagram(limit = 10) {
     const posts = await page.evaluate((maxRes) => {
       const items = [];
       const seen = new Set();
-      const links = document.querySelectorAll('a[href*="/p/"]');
+      const links = document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]');
       for (const link of links) {
         if (items.length >= maxRes) break;
         const href = link.getAttribute('href');
+        const isReel = href?.includes('/reel/');
+        const id = href ? href.split(isReel ? '/reel/' : '/p/')[1]?.split('/')[0] || '' : '';
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+
+        const video = link.querySelector('video');
         const img = link.querySelector('img');
-        const id = href ? href.split('/p/')[1]?.split('/')[0] || '' : '';
-        if (id && !seen.has(id)) {
-          seen.add(id);
-          items.push({
-            id,
-            caption: img?.alt?.substring(0, 300) || '',
-            image: img?.src || '',
-            link: `https://www.instagram.com${href}`,
-            type: 'image',
-          });
-        }
+        let mediaUrl = video?.src || '';
+        if (!mediaUrl && img?.src) mediaUrl = img.src;
+        const caption = img?.alt?.substring(0, 300) || '';
+
+        items.push({ id, caption, image: mediaUrl, link: `https://www.instagram.com${href}`, type: isReel ? 'reel' : 'image' });
       }
       return items;
     }, maxRes * 2);
@@ -400,19 +389,18 @@ async function scrapeInstagramPage(pageUrl, limit = 10) {
       for (const link of selector) {
         if (items.length >= maxRes) break;
         const href = link.getAttribute('href');
-        const img = link.querySelector('img');
         const isReel = href?.includes('/reel/');
         const id = href ? href.split(isReel ? '/reel/' : '/p/')[1]?.split('/')[0] || '' : '';
-        if (id && !seen.has(id)) {
-          seen.add(id);
-          items.push({
-            id,
-            caption: img?.alt?.substring(0, 300) || '',
-            image: img?.src || '',
-            link: `https://www.instagram.com${href}`,
-            type: isReel ? 'reel' : 'image',
-          });
-        }
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+
+        const video = link.querySelector('video');
+        const img = link.querySelector('img');
+        let mediaUrl = video?.src || '';
+        if (!mediaUrl && img?.src) mediaUrl = img.src;
+        const caption = img?.alt?.substring(0, 300) || '';
+
+        items.push({ id, caption, image: mediaUrl, link: `https://www.instagram.com${href}`, type: isReel ? 'reel' : 'image' });
       }
       return items;
     }, maxRes * 2);
